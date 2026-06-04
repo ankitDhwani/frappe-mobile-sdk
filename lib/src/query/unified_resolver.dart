@@ -11,6 +11,7 @@ import '../database/table_name.dart';
 import '../models/meta_resolver.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
+import '../perf/sdk_watchdog.dart';
 import 'filter_parser.dart';
 import 'link_decorator.dart';
 import 'query_result.dart';
@@ -89,6 +90,38 @@ class UnifiedResolver {
     int page = 0,
     int pageSize = 50,
     bool includeFailed = false,
+  }) {
+    return SdkWatchdog.measure<QueryResult<Map<String, Object?>>>(
+      feature: 'db.resolver',
+      operation: 'resolve',
+      metadata: <String, Object?>{
+        'doctype': doctype,
+        'filterCount': filters.length,
+        'orFilterCount': orFilters.length,
+        'page': page,
+        'pageSize': pageSize,
+        'includeFailed': includeFailed,
+      },
+      body: () => _resolveMeasured(
+        doctype: doctype,
+        filters: filters,
+        orFilters: orFilters,
+        orderBy: orderBy,
+        page: page,
+        pageSize: pageSize,
+        includeFailed: includeFailed,
+      ),
+    );
+  }
+
+  Future<QueryResult<Map<String, Object?>>> _resolveMeasured({
+    required String doctype,
+    required List<List> filters,
+    required List<List> orFilters,
+    required String? orderBy,
+    required int page,
+    required int pageSize,
+    required bool includeFailed,
   }) async {
     if (!offlineMode.enabled) {
       return _onlinePassthrough(
@@ -185,7 +218,16 @@ class UnifiedResolver {
   ///
   /// Returns 0 when the per-doctype table doesn't exist yet (e.g. closure
   /// pull hasn't created it). Caller-friendly: never throws on empty state.
-  Future<int> count(String doctype, {bool dirtyOnly = false}) async {
+  Future<int> count(String doctype, {bool dirtyOnly = false}) {
+    return SdkWatchdog.measure<int>(
+      feature: 'db.resolver',
+      operation: 'count',
+      metadata: <String, Object?>{'doctype': doctype, 'dirtyOnly': dirtyOnly},
+      body: () => _countMeasured(doctype, dirtyOnly: dirtyOnly),
+    );
+  }
+
+  Future<int> _countMeasured(String doctype, {required bool dirtyOnly}) async {
     if (!offlineMode.enabled) {
       if (dirtyOnly) return 0;
       if (client == null) {

@@ -9,6 +9,7 @@ import '../concurrency/write_queue.dart';
 import '../database/daos/doctype_meta_dao.dart';
 import '../database/daos/outbox_dao.dart';
 import '../database/daos/pending_attachment_dao.dart';
+import '../perf/sdk_watchdog.dart';
 import '../database/sqlite_utils.dart';
 import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
@@ -161,7 +162,15 @@ class PushEngine {
   /// (PR#36 round-4 B1). A concurrent caller does not start a second drain;
   /// it requests exactly one more drain after the current one finishes, so
   /// work enqueued mid-drain is still picked up.
-  Future<void> runOnce() async {
+  Future<void> runOnce() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sync.push',
+      operation: 'runOnce',
+      body: _runOnceMeasured,
+    );
+  }
+
+  Future<void> _runOnceMeasured() async {
     if (_running) {
       _rerunRequested = true;
       return;

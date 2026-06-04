@@ -9,6 +9,7 @@ import '../database/app_database.dart';
 import '../models/doc_type_meta.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
+import '../perf/sdk_watchdog.dart';
 import '../sync/cursor.dart';
 import 'offline_repository.dart';
 
@@ -91,7 +92,18 @@ class SyncService {
   /// Detail counts (success/failure/error list) are not populated here;
   /// callers wanting that signal should subscribe to
   /// `SyncStateNotifier` (exposed via `sdk.sync.state$`).
-  Future<SyncResult> pushSync({String? doctype}) async {
+  Future<SyncResult> pushSync({String? doctype}) {
+    return SdkWatchdog.measure<SyncResult>(
+      feature: 'sync.service',
+      operation: 'pushSync',
+      metadata: doctype == null
+          ? const <String, Object?>{}
+          : <String, Object?>{'doctype': doctype},
+      body: () => _pushSyncMeasured(doctype: doctype),
+    );
+  }
+
+  Future<SyncResult> _pushSyncMeasured({String? doctype}) async {
     if (!offlineMode.enabled) {
       return SyncResult.empty(status: SyncStatus.offlineModeDisabled);
     }
@@ -178,7 +190,21 @@ class SyncService {
   }
 
   /// Pull updates from server. Public entrypoint — guarded by [_syncMutex].
-  Future<SyncResult> pullSync({required String doctype, int? since}) async {
+  Future<SyncResult> pullSync({required String doctype, int? since}) {
+    return SdkWatchdog.measure<SyncResult>(
+      feature: 'sync.service',
+      operation: 'pullSync',
+      metadata: since == null
+          ? <String, Object?>{'doctype': doctype}
+          : <String, Object?>{'doctype': doctype, 'since': since},
+      body: () => _pullSyncMeasured(doctype: doctype, since: since),
+    );
+  }
+
+  Future<SyncResult> _pullSyncMeasured({
+    required String doctype,
+    int? since,
+  }) async {
     if (!offlineMode.enabled) {
       return SyncResult.empty(status: SyncStatus.offlineModeDisabled);
     }
@@ -212,7 +238,18 @@ class SyncService {
   /// time this resumes, the in-flight closure batch has likely already
   /// pulled this doctype, so the underlying call is usually a cheap
   /// incremental delta.
-  Future<SyncResult> pullSyncWaiting({
+  Future<SyncResult> pullSyncWaiting({required String doctype, int? since}) {
+    return SdkWatchdog.measure<SyncResult>(
+      feature: 'sync.service',
+      operation: 'pullSyncWaiting',
+      metadata: since == null
+          ? <String, Object?>{'doctype': doctype}
+          : <String, Object?>{'doctype': doctype, 'since': since},
+      body: () => _pullSyncWaitingMeasured(doctype: doctype, since: since),
+    );
+  }
+
+  Future<SyncResult> _pullSyncWaitingMeasured({
     required String doctype,
     int? since,
   }) async {
@@ -251,6 +288,24 @@ class SyncService {
   /// matching the size of the SDK's `_pullPool`. Pass an explicit value
   /// only for tests or to artificially throttle.
   Future<Map<String, SyncResult>> pullSyncMany({
+    required List<String> doctypes,
+    int? concurrency,
+  }) {
+    return SdkWatchdog.measure<Map<String, SyncResult>>(
+      feature: 'sync.service',
+      operation: 'pullSyncMany',
+      metadata: concurrency == null
+          ? <String, Object?>{'doctypeCount': doctypes.length}
+          : <String, Object?>{
+              'doctypeCount': doctypes.length,
+              'concurrency': concurrency,
+            },
+      body: () =>
+          _pullSyncManyMeasured(doctypes: doctypes, concurrency: concurrency),
+    );
+  }
+
+  Future<Map<String, SyncResult>> _pullSyncManyMeasured({
     required List<String> doctypes,
     int? concurrency,
   }) async {

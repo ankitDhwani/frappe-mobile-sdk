@@ -15,6 +15,7 @@ import '../models/document.dart';
 import '../models/meta_diff.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
+import '../perf/sdk_watchdog.dart';
 import '../database/daos/outbox_dao.dart';
 import '../models/outbox_row.dart';
 import '../sync/payload_serializer.dart';
@@ -310,6 +311,18 @@ class OfflineRepository {
   Future<Map<String, dynamic>?> getRowFromPerDoctypeTable(
     String doctype,
     String nameOrUuid,
+  ) {
+    return SdkWatchdog.measure<Map<String, dynamic>?>(
+      feature: 'db.repository',
+      operation: 'getRowFromPerDoctypeTable',
+      metadata: <String, Object?>{'doctype': doctype},
+      body: () => _getRowFromPerDoctypeTableMeasured(doctype, nameOrUuid),
+    );
+  }
+
+  Future<Map<String, dynamic>?> _getRowFromPerDoctypeTableMeasured(
+    String doctype,
+    String nameOrUuid,
   ) async {
     final tableName = normalizeDoctypeTableName(doctype);
     final db = _database.rawDatabase;
@@ -385,6 +398,21 @@ class OfflineRepository {
   /// [LocalWriter.writeParentInTxn] + [OutboxDao.recordSave] in one
   /// spanning transaction so docs__ + outbox stay consistent.
   Future<String> saveDocument({
+    required String doctype,
+    required Map<String, dynamic> data,
+  }) {
+    return SdkWatchdog.measure<String>(
+      feature: 'db.repository',
+      operation: 'saveDocument',
+      metadata: <String, Object?>{
+        'doctype': doctype,
+        'fieldCount': data.length,
+      },
+      body: () => _saveDocumentMeasured(doctype: doctype, data: data),
+    );
+  }
+
+  Future<String> _saveDocumentMeasured({
     required String doctype,
     required Map<String, dynamic> data,
   }) async {
@@ -584,6 +612,19 @@ class OfflineRepository {
   Future<void> deleteDocument({
     required String doctype,
     required String mobileUuid,
+  }) {
+    return SdkWatchdog.measure<void>(
+      feature: 'db.repository',
+      operation: 'deleteDocument',
+      metadata: <String, Object?>{'doctype': doctype},
+      body: () =>
+          _deleteDocumentMeasured(doctype: doctype, mobileUuid: mobileUuid),
+    );
+  }
+
+  Future<void> _deleteDocumentMeasured({
+    required String doctype,
+    required String mobileUuid,
   }) async {
     if (!offlineMode.enabled) {
       _requireOnlineClient('deleteDocument');
@@ -705,6 +746,26 @@ class OfflineRepository {
   /// skipped). Single source of truth for "the server says this doc
   /// looks like X" — writes only to `docs__<doctype>`.
   Future<void> applyServerDocument({
+    required String doctype,
+    required String serverName,
+    required Map<String, dynamic> data,
+  }) {
+    return SdkWatchdog.measure<void>(
+      feature: 'db.repository',
+      operation: 'applyServerDocument',
+      metadata: <String, Object?>{
+        'doctype': doctype,
+        'fieldCount': data.length,
+      },
+      body: () => _applyServerDocumentMeasured(
+        doctype: doctype,
+        serverName: serverName,
+        data: data,
+      ),
+    );
+  }
+
+  Future<void> _applyServerDocumentMeasured({
     required String doctype,
     required String serverName,
     required Map<String, dynamic> data,
@@ -966,6 +1027,22 @@ class OfflineRepository {
   /// Used when opening a document in offline mode, where the resolver's flat
   /// row does not embed child arrays.
   Future<Document> attachChildRows(
+    String doctype,
+    Document doc,
+    DocTypeMeta meta,
+  ) {
+    return SdkWatchdog.measure<Document>(
+      feature: 'db.repository',
+      operation: 'attachChildRows',
+      metadata: <String, Object?>{
+        'doctype': doctype,
+        'fieldCount': meta.fields.length,
+      },
+      body: () => _attachChildRowsMeasured(doctype, doc, meta),
+    );
+  }
+
+  Future<Document> _attachChildRowsMeasured(
     String doctype,
     Document doc,
     DocTypeMeta meta,

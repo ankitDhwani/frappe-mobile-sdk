@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import '../database/daos/outbox_dao.dart';
 import '../models/outbox_row.dart';
+import '../perf/sdk_watchdog.dart';
 import '../sync/sync_state.dart';
 import '../sync/sync_state_notifier.dart';
 import 'retry_priority.dart';
@@ -97,7 +98,15 @@ class SyncController {
   /// was active for them) are re-pulled after the push completes — SIG-2.
   /// Used by `Sync now` button + connectivity-restore hooks. No-ops while
   /// paused.
-  Future<void> syncNow() async {
+  Future<void> syncNow() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sync.controller',
+      operation: 'syncNow',
+      body: _syncNowMeasured,
+    );
+  }
+
+  Future<void> _syncNowMeasured() async {
     if (notifier.value.isPaused) return;
     Set<String> deferred = const <String>{};
     try {
@@ -153,7 +162,16 @@ class SyncController {
 
   /// Re-queue a single failed/blocked/conflict row and run a single
   /// push drain. No-op for `done` rows.
-  Future<void> retry(int outboxId) async {
+  Future<void> retry(int outboxId) {
+    return SdkWatchdog.measure<void>(
+      feature: 'sync.controller',
+      operation: 'retry',
+      metadata: <String, Object?>{'outboxId': outboxId},
+      body: () => _retryMeasured(outboxId),
+    );
+  }
+
+  Future<void> _retryMeasured(int outboxId) async {
     final row = await outboxDao.findById(outboxId);
     if (row == null) return;
     if (row.state == OutboxState.done) return;
@@ -165,7 +183,18 @@ class SyncController {
   /// priority, then run a single push drain. [filterDoctypes] limits
   /// the operation to a doctype subset (used by the per-doctype
   /// `Retry` action in SyncErrorsScreen).
-  Future<void> retryAll({List<String>? filterDoctypes}) async {
+  Future<void> retryAll({List<String>? filterDoctypes}) {
+    return SdkWatchdog.measure<void>(
+      feature: 'sync.controller',
+      operation: 'retryAll',
+      metadata: filterDoctypes == null
+          ? const <String, Object?>{}
+          : <String, Object?>{'doctypeCount': filterDoctypes.length},
+      body: () => _retryAllMeasured(filterDoctypes: filterDoctypes),
+    );
+  }
+
+  Future<void> _retryAllMeasured({List<String>? filterDoctypes}) async {
     final all = [
       ...await outboxDao.findByState(OutboxState.failed),
       ...await outboxDao.findByState(OutboxState.conflict),

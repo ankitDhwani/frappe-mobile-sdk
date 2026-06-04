@@ -6,6 +6,7 @@ import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
 import '../../models/doc_field.dart';
 import '../../models/link_filter_result.dart';
+import '../../perf/sdk_watchdog.dart';
 import '../../constants/field_types.dart';
 import '../../services/link_option_service.dart';
 import '../../services/link_field_coordinator.dart';
@@ -281,59 +282,86 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
   @override
   void initState() {
-    super.initState();
-    _formKey = GlobalKey<FormBuilderState>();
+    SdkWatchdog.measureSync<void>(
+      feature: 'form.render',
+      operation: 'builderInitState',
+      metadata: <String, Object?>{
+        'doctype': widget.meta.name,
+        'fieldCount': widget.meta.fields.length,
+      },
+      body: () {
+        super.initState();
+        _formKey = GlobalKey<FormBuilderState>();
 
-    _formData.addAll(widget.initialData ?? {});
+        _formData.addAll(widget.initialData ?? {});
 
-    for (final field in widget.meta.fields) {
-      if (field.fieldname != null && !_formData.containsKey(field.fieldname)) {
-        final defVal = field.defaultValue;
-        if (defVal != null &&
-            field.fieldtype == 'Date' &&
-            defVal.toLowerCase() == 'today') {
-          final now = DateTime.now();
-          _formData[field.fieldname!] =
-              '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-        } else {
-          _formData[field.fieldname!] ??= defVal;
+        for (final field in widget.meta.fields) {
+          if (field.fieldname != null &&
+              !_formData.containsKey(field.fieldname)) {
+            final defVal = field.defaultValue;
+            if (defVal != null &&
+                field.fieldtype == 'Date' &&
+                defVal.toLowerCase() == 'today') {
+              final now = DateTime.now();
+              _formData[field.fieldname!] =
+                  '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+            } else {
+              _formData[field.fieldname!] ??= defVal;
+            }
+          }
         }
-      }
-    }
 
-    if (widget.linkOptionService != null && widget.useLinkFieldCoordinator) {
-      _linkFieldCoordinator = LinkFieldCoordinator(
-        meta: widget.meta,
-        linkOptionService: widget.linkOptionService!,
-        useCoordinator: true,
-        parentFormData: effectiveParentFormData,
-        getLinkFilterBuilder: widget.getLinkFilterBuilder,
-      );
-      _linkFieldCoordinator!.prefetchInitial(_formData);
-      _progressSubscription = _linkFieldCoordinator!.progressStream.listen((p) {
-        if (mounted) {
-          setState(() {
-            _linkOptionsLoading = p.loading;
-            _linkOptionsLoadingMessage = p.message;
+        if (widget.linkOptionService != null &&
+            widget.useLinkFieldCoordinator) {
+          _linkFieldCoordinator = LinkFieldCoordinator(
+            meta: widget.meta,
+            linkOptionService: widget.linkOptionService!,
+            useCoordinator: true,
+            parentFormData: effectiveParentFormData,
+            getLinkFilterBuilder: widget.getLinkFilterBuilder,
+          );
+          _linkFieldCoordinator!.prefetchInitial(_formData);
+          _progressSubscription = _linkFieldCoordinator!.progressStream.listen((
+            p,
+          ) {
+            if (mounted) {
+              setState(() {
+                _linkOptionsLoading = p.loading;
+                _linkOptionsLoadingMessage = p.message;
+              });
+            }
           });
         }
-      });
-    }
 
-    _fieldFactory =
-        widget.customFieldFactory ??
-        FieldFactory(
-          linkOptionService: widget.linkOptionService,
-          linkFieldCoordinator: _linkFieldCoordinator,
+        _fieldFactory =
+            widget.customFieldFactory ??
+            FieldFactory(
+              linkOptionService: widget.linkOptionService,
+              linkFieldCoordinator: _linkFieldCoordinator,
+            );
+
+        _buildFormStructure();
+        _tabController = TabController(
+          length: _tabs.isEmpty ? 1 : _tabs.length,
+          vsync: this,
         );
-
-    _buildFormStructure();
-    _tabController = TabController(
-      length: _tabs.isEmpty ? 1 : _tabs.length,
-      vsync: this,
+        _attachTabControllerListener();
+        _triggerFetchFromForPrefilledLinks();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          SdkWatchdog.measureSync<void>(
+            feature: 'form.render',
+            operation: 'firstFrameMounted',
+            metadata: <String, Object?>{
+              'doctype': widget.meta.name,
+              'fieldCount': widget.meta.fields.length,
+              'tabCount': _tabs.length,
+            },
+            body: () {},
+          );
+        });
+      },
     );
-    _attachTabControllerListener();
-    _triggerFetchFromForPrefilledLinks();
   }
 
   /// Trigger fetch_from for Link fields that already have values in _formData
@@ -1188,7 +1216,10 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   @override
   void didUpdateWidget(FrappeFormBuilder oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final initialDataChanged = !mapEquals(oldWidget.initialData, widget.initialData);
+    final initialDataChanged = !mapEquals(
+      oldWidget.initialData,
+      widget.initialData,
+    );
     final metaChanged = oldWidget.meta.name != widget.meta.name;
     if (initialDataChanged || metaChanged) {
       _progressSubscription?.cancel();

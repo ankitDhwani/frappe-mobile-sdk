@@ -5,6 +5,7 @@ import '../models/closure_result.dart';
 import '../models/dep_graph.dart';
 import '../models/doc_type_meta.dart';
 import '../models/mobile_form_name.dart';
+import '../perf/sdk_watchdog.dart';
 import '../database/app_database.dart';
 import '../database/entities/doctype_meta_entity.dart';
 import 'bulk_watermark_probe.dart';
@@ -54,7 +55,16 @@ class MetaService {
   }
 
   /// Fetches from server and saves to DB only (no in-memory cache). Use for prefetch.
-  Future<void> fetchAndStoreInDb(String doctype) async {
+  Future<void> fetchAndStoreInDb(String doctype) {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'fetchAndStoreInDb',
+      metadata: <String, Object?>{'doctype': doctype},
+      body: () => _fetchAndStoreInDbMeasured(doctype),
+    );
+  }
+
+  Future<void> _fetchAndStoreInDbMeasured(String doctype) async {
     final metaData = await _fetchMetaFromServer(doctype);
     // Preserve existing serverModifiedAt and isMobileForm if exists
     final existing = await _database.doctypeMetaDao.findByDoctype(doctype);
@@ -118,9 +128,21 @@ class MetaService {
 
   /// Get metadata for a DocType. Loads only when required; uses bounded cache.
   /// Call [clearDocTypeCache] when leaving the screen to free memory.
-  Future<DocTypeMeta> getMeta(
+  Future<DocTypeMeta> getMeta(String doctype, {bool forceRefresh = false}) {
+    return SdkWatchdog.measure<DocTypeMeta>(
+      feature: 'sdk.meta',
+      operation: 'getMeta',
+      metadata: <String, Object?>{
+        'doctype': doctype,
+        'forceRefresh': forceRefresh,
+      },
+      body: () => _getMetaMeasured(doctype, forceRefresh: forceRefresh),
+    );
+  }
+
+  Future<DocTypeMeta> _getMetaMeasured(
     String doctype, {
-    bool forceRefresh = false,
+    required bool forceRefresh,
   }) async {
     if (!forceRefresh && _metaCache.containsKey(doctype)) {
       _metaCacheOrder.remove(doctype);
@@ -204,7 +226,15 @@ class MetaService {
   /// Compares serverModifiedAt from doctype_meta table with stored modified
   /// timestamps. Syncs any doctypes that have newer timestamps or are missing.
   /// Only checks doctypes marked as isMobileForm = true.
-  Future<void> checkAndSyncDoctypes() async {
+  Future<void> checkAndSyncDoctypes() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'checkAndSyncDoctypes',
+      body: _checkAndSyncDoctypesMeasured,
+    );
+  }
+
+  Future<void> _checkAndSyncDoctypesMeasured() async {
     try {
       // Get all mobile form doctypes from doctype_meta table
       final mobileFormMetas = await _database.doctypeMetaDao
@@ -286,7 +316,15 @@ class MetaService {
   }
 
   /// Prefetch metadata for all mobile form doctypes into DB.
-  Future<void> prefetchMobileFormDoctypes() async {
+  Future<void> prefetchMobileFormDoctypes() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'prefetchMobileFormDoctypes',
+      body: _prefetchMobileFormDoctypesMeasured,
+    );
+  }
+
+  Future<void> _prefetchMobileFormDoctypesMeasured() async {
     try {
       final mobileFormMetas = await _database.doctypeMetaDao
           .findMobileFormDoctypes();
@@ -304,7 +342,15 @@ class MetaService {
   }
 
   /// Sync all mobile form doctypes.
-  Future<void> syncAllMobileFormDoctypes() async {
+  Future<void> syncAllMobileFormDoctypes() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'syncAllMobileFormDoctypes',
+      body: _syncAllMobileFormDoctypesMeasured,
+    );
+  }
+
+  Future<void> _syncAllMobileFormDoctypesMeasured() async {
     try {
       final mobileFormMetas = await _database.doctypeMetaDao
           .findMobileFormDoctypes();
@@ -425,7 +471,15 @@ class MetaService {
   /// and syncs doctype metadata for any doctypes that have been updated or are new.
   ///
   /// Throws if not authenticated or API call fails.
-  Future<void> resyncMobileConfiguration() async {
+  Future<void> resyncMobileConfiguration() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'resyncMobileConfiguration',
+      body: _resyncMobileConfigurationMeasured,
+    );
+  }
+
+  Future<void> _resyncMobileConfigurationMeasured() async {
     try {
       // Authenticated call so the server can filter to doctypes this user can read.
       final result = await _client.rest.get(
@@ -523,10 +577,15 @@ class MetaService {
   Future<ClosureResult> closure(
     List<String> entryPoints, {
     MetaFetcher? metaFetcher,
-  }) async {
-    return ClosureBuilder.build(
-      entryPoints: entryPoints,
-      metaFetcher: metaFetcher ?? (dt) => getMeta(dt),
+  }) {
+    return SdkWatchdog.measure<ClosureResult>(
+      feature: 'sdk.meta',
+      operation: 'closure',
+      metadata: <String, Object?>{'entryPointCount': entryPoints.length},
+      body: () => ClosureBuilder.build(
+        entryPoints: entryPoints,
+        metaFetcher: metaFetcher ?? (dt) => getMeta(dt),
+      ),
     );
   }
 

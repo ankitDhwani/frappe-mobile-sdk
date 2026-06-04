@@ -9,6 +9,7 @@ import '../models/document.dart';
 import '../models/link_filter_result.dart';
 import '../models/outbox_row.dart';
 import '../models/workflow_transition.dart';
+import '../perf/sdk_watchdog.dart';
 import '../services/link_option_service.dart';
 import '../services/meta_service.dart';
 import '../services/offline_repository.dart';
@@ -571,7 +572,20 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     return null;
   }
 
-  Future<void> _handleSubmit(Map<String, dynamic> formData) async {
+  Future<void> _handleSubmit(Map<String, dynamic> formData) {
+    return SdkWatchdog.measure<void>(
+      feature: 'form.save',
+      operation: 'handleSubmit',
+      metadata: <String, Object?>{
+        'doctype': widget.meta.name,
+        'fieldCount': formData.length,
+        'isNew': widget.document == null,
+      },
+      body: () => _handleSubmitMeasured(formData),
+    );
+  }
+
+  Future<void> _handleSubmitMeasured(Map<String, dynamic> formData) async {
     // Local-first validation: DB-independent rules run on-device so the user
     // sees errors at save-time rather than at sync-time. Returns null on pass;
     // a non-null String aborts the save and is shown to the user.

@@ -135,3 +135,5 @@ export 'src/ui/dialogs/force_logout_confirm.dart' show showForceLogoutConfirm;
 // Utils (debug tracer + user-friendly errors)
 export 'src/api/utils.dart' show extractErrorMessage, toUserFriendlyMessage;
 export 'src/utils/api_tracer.dart' show ApiTracer;
+export 'src/perf/sdk_watchdog.dart'
+    show SdkPerfEvent, SdkPerfSnapshot, SdkWatchdog;

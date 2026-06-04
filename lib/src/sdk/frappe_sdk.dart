@@ -16,6 +16,7 @@ import '../models/doc_type_meta.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
 import '../models/session_user.dart';
+import '../perf/sdk_watchdog.dart';
 import '../query/unified_resolver.dart';
 import '../services/auth_service.dart';
 import '../services/local_writer.dart';
@@ -232,6 +233,15 @@ class FrappeSDK {
   /// - tries to restore session (mobile_auth / OAuth / API key)
   /// - if successful, runs an initial metadata + data sync for mobile doctypes
   Future<void> initialize([bool autoRestoreAndSync = false]) async {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.lifecycle',
+      operation: 'initialize',
+      metadata: <String, Object?>{'autoRestoreAndSync': autoRestoreAndSync},
+      body: () => _initializeMeasured(autoRestoreAndSync),
+    );
+  }
+
+  Future<void> _initializeMeasured(bool autoRestoreAndSync) async {
     if (_initialized) return;
     final inFlight = _initInFlight;
     if (inFlight != null) return inFlight.future;
@@ -552,7 +562,18 @@ class FrappeSDK {
       _resolveBootMode(persisted);
 
   /// Login with username and password (stateless, returns user info)
-  Future<Map<String, dynamic>> login(String username, String password) async {
+  Future<Map<String, dynamic>> login(String username, String password) {
+    return SdkWatchdog.measure<Map<String, dynamic>>(
+      feature: 'sdk.auth',
+      operation: 'login',
+      body: () => _loginMeasured(username, password),
+    );
+  }
+
+  Future<Map<String, dynamic>> _loginMeasured(
+    String username,
+    String password,
+  ) async {
     if (!_initialized) await initialize();
     final response = await _authService!.login(username, password);
     await _permissionService!.saveFromLoginResponse(response['permissions']);
@@ -571,13 +592,32 @@ class FrappeSDK {
   }
 
   /// Send OTP to mobile number for login. Returns response (e.g. tmp_id).
-  Future<Map<String, dynamic>> sendLoginOtp(String mobileNo) async {
+  Future<Map<String, dynamic>> sendLoginOtp(String mobileNo) {
+    return SdkWatchdog.measure<Map<String, dynamic>>(
+      feature: 'sdk.auth',
+      operation: 'sendLoginOtp',
+      body: () => _sendLoginOtpMeasured(mobileNo),
+    );
+  }
+
+  Future<Map<String, dynamic>> _sendLoginOtpMeasured(String mobileNo) async {
     if (!_initialized) await initialize();
     return await _authService!.sendLoginOtp(mobileNo);
   }
 
   /// Verify OTP and complete login. Returns same shape as [login].
-  Future<Map<String, dynamic>> verifyLoginOtp(String tmpId, String otp) async {
+  Future<Map<String, dynamic>> verifyLoginOtp(String tmpId, String otp) {
+    return SdkWatchdog.measure<Map<String, dynamic>>(
+      feature: 'sdk.auth',
+      operation: 'verifyLoginOtp',
+      body: () => _verifyLoginOtpMeasured(tmpId, otp),
+    );
+  }
+
+  Future<Map<String, dynamic>> _verifyLoginOtpMeasured(
+    String tmpId,
+    String otp,
+  ) async {
     if (!_initialized) await initialize();
     final response = await _authService!.verifyLoginOtp(tmpId, otp);
     await _permissionService!.saveFromLoginResponse(response['permissions']);
@@ -594,7 +634,15 @@ class FrappeSDK {
   }
 
   /// Login with API key
-  Future<bool> loginWithApiKey(String apiKey, String apiSecret) async {
+  Future<bool> loginWithApiKey(String apiKey, String apiSecret) {
+    return SdkWatchdog.measure<bool>(
+      feature: 'sdk.auth',
+      operation: 'loginWithApiKey',
+      body: () => _loginWithApiKeyMeasured(apiKey, apiSecret),
+    );
+  }
+
+  Future<bool> _loginWithApiKeyMeasured(String apiKey, String apiSecret) async {
     if (!_initialized) await initialize();
     final ok = await _authService!.loginWithApiKey(apiKey, apiSecret);
     if (ok) await _fetchUserInfoAndApply();
@@ -620,6 +668,24 @@ class FrappeSDK {
 
   /// Login via Frappe OAuth 2.0 (authorization code + PKCE). Call after user authorizes and you have the code from redirect.
   Future<bool> loginWithOAuth({
+    required String code,
+    required String codeVerifier,
+    required String clientId,
+    required String redirectUri,
+  }) {
+    return SdkWatchdog.measure<bool>(
+      feature: 'sdk.auth',
+      operation: 'loginWithOAuth',
+      body: () => _loginWithOAuthMeasured(
+        code: code,
+        codeVerifier: codeVerifier,
+        clientId: clientId,
+        redirectUri: redirectUri,
+      ),
+    );
+  }
+
+  Future<bool> _loginWithOAuthMeasured({
     required String code,
     required String codeVerifier,
     required String clientId,
@@ -659,7 +725,16 @@ class FrappeSDK {
   /// user (or different user) doesn't hit stale-cache bugs — e.g.
   /// `_ensurePerDoctypeTable` short-circuiting against a cache that still
   /// remembers a table that was just dropped.
-  Future<void> logout({bool clearDatabase = true}) async {
+  Future<void> logout({bool clearDatabase = true}) {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.auth',
+      operation: 'logout',
+      metadata: <String, Object?>{'clearDatabase': clearDatabase},
+      body: () => _logoutMeasured(clearDatabase: clearDatabase),
+    );
+  }
+
+  Future<void> _logoutMeasured({required bool clearDatabase}) async {
     if (!_initialized) {
       throw StateError(
         'Cannot logout: SDK not initialized. Call initialize() first.',
@@ -853,13 +928,29 @@ class FrappeSDK {
 
   /// Prefetch metadata for mobile form doctypes into DB only (no in-memory cache).
   /// Use this at app start; meta is loaded into cache only when getMeta(doctype) is used.
-  Future<void> loadMetadata() async {
+  Future<void> loadMetadata() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'loadMetadata',
+      body: _loadMetadataMeasured,
+    );
+  }
+
+  Future<void> _loadMetadataMeasured() async {
     if (!_initialized) await initialize();
     await _metaService!.prefetchMobileFormDoctypes();
   }
 
   /// Sync all mobile form doctypes
-  Future<void> syncAll() async {
+  Future<void> syncAll() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.sync',
+      operation: 'syncAllMobileForms',
+      body: _syncAllMeasured,
+    );
+  }
+
+  Future<void> _syncAllMeasured() async {
     if (!_initialized) await initialize();
     await _metaService!.syncAllMobileFormDoctypes();
   }
@@ -868,7 +959,15 @@ class FrappeSDK {
   ///
   /// Compares timestamps from mobile_form_names with stored doctype meta
   /// and syncs any that have been updated or are new.
-  Future<void> checkAndSyncDoctypes() async {
+  Future<void> checkAndSyncDoctypes() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'checkAndSyncDoctypes',
+      body: _checkAndSyncDoctypesMeasured,
+    );
+  }
+
+  Future<void> _checkAndSyncDoctypesMeasured() async {
     if (!_initialized) await initialize();
     await _metaService!.checkAndSyncDoctypes();
   }
@@ -879,7 +978,15 @@ class FrappeSDK {
   /// and syncs doctype metadata for any doctypes that have been updated or are new.
   ///
   /// Throws if not authenticated or API call fails.
-  Future<void> resyncMobileConfiguration() async {
+  Future<void> resyncMobileConfiguration() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.meta',
+      operation: 'resyncMobileConfiguration',
+      body: _resyncMobileConfigurationMeasured,
+    );
+  }
+
+  Future<void> _resyncMobileConfigurationMeasured() async {
     if (!_initialized) await initialize();
     await _metaService!.resyncMobileConfiguration();
   }
@@ -1048,7 +1155,11 @@ class FrappeSDK {
     _metaSyncInFlight = completer;
     () async {
       try {
-        await _runInitialMetaAndDataSync();
+        await SdkWatchdog.measure<void>(
+          feature: 'sdk.boot',
+          operation: 'initialMetaAndDataSync',
+          body: _runInitialMetaAndDataSync,
+        );
         completer.complete();
       } catch (e, st) {
         completer.completeError(e, st);
@@ -1163,7 +1274,15 @@ class FrappeSDK {
   /// Returns the set of doctypes deferred by SIG-2 (push was active during
   /// pull). Callers that care (SyncController) re-pull those doctypes after
   /// push completes.
-  Future<Set<String>> _runUpgradeClosurePull() async {
+  Future<Set<String>> _runUpgradeClosurePull() {
+    return SdkWatchdog.measure<Set<String>>(
+      feature: 'sdk.sync',
+      operation: 'upgradeClosurePull',
+      body: _runUpgradeClosurePullMeasured,
+    );
+  }
+
+  Future<Set<String>> _runUpgradeClosurePullMeasured() async {
     if (_metaService == null || _syncService == null || _pullEngine == null) {
       return const <String>{};
     }
@@ -1279,7 +1398,15 @@ class FrappeSDK {
   /// `_syncService`, or `_database` is null). Per-doctype failures are logged
   /// and skipped. Emits to [syncComplete$] when finished so the home screen
   /// refreshes its counts.
-  Future<void> forcePullAll() async {
+  Future<void> forcePullAll() {
+    return SdkWatchdog.measure<void>(
+      feature: 'sdk.sync',
+      operation: 'forcePullAll',
+      body: _forcePullAllMeasured,
+    );
+  }
+
+  Future<void> _forcePullAllMeasured() async {
     if (_metaService == null || _syncService == null || _database == null) {
       return;
     }

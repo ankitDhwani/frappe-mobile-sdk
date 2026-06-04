@@ -12,6 +12,7 @@ import '../models/closure_result.dart';
 import '../models/dep_graph.dart';
 import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
+import '../perf/sdk_watchdog.dart';
 import 'cursor.dart';
 import 'pull_apply.dart';
 import 'pull_page_fetcher.dart';
@@ -100,6 +101,23 @@ class PullEngine {
   Future<Set<String>> run(
     ClosureResult closure, {
     Set<String>? allowedDoctypes,
+  }) {
+    return SdkWatchdog.measure<Set<String>>(
+      feature: 'sync.pull',
+      operation: 'run',
+      metadata: <String, Object?>{
+        'closureDoctypeCount': closure.doctypes.length,
+        'childDoctypeCount': closure.childDoctypes.length,
+        if (allowedDoctypes != null)
+          'allowedDoctypeCount': allowedDoctypes.length,
+      },
+      body: () => _runMeasured(closure, allowedDoctypes: allowedDoctypes),
+    );
+  }
+
+  Future<Set<String>> _runMeasured(
+    ClosureResult closure, {
+    Set<String>? allowedDoctypes,
   }) async {
     notifier.value = notifier.value.copyWith(isPulling: true);
     final deferred = <String>{};
@@ -126,6 +144,19 @@ class PullEngine {
   }
 
   Future<void> _runDoctype(
+    String doctype,
+    ClosureResult closure,
+    Set<String> deferred,
+  ) {
+    return SdkWatchdog.measure<void>(
+      feature: 'sync.pull',
+      operation: 'runDoctype',
+      metadata: <String, Object?>{'doctype': doctype},
+      body: () => _runDoctypeMeasured(doctype, closure, deferred),
+    );
+  }
+
+  Future<void> _runDoctypeMeasured(
     String doctype,
     ClosureResult closure,
     Set<String> deferred,
