@@ -977,39 +977,43 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     if (section.sectionField.label == null ||
         section.sectionField.label!.isEmpty) {
-      return Padding(
-        padding: formStyle.sectionPadding ?? const EdgeInsets.all(16.0),
-        child: content,
+      return RepaintBoundary(
+        child: Padding(
+          padding: formStyle.sectionPadding ?? const EdgeInsets.all(16.0),
+          child: content,
+        ),
       );
     }
 
-    return Card(
-      margin: formStyle.sectionMargin ?? const EdgeInsets.only(bottom: 16.0),
-      color: formStyle.sectionCardColor,
-      child: Padding(
-        padding: formStyle.sectionPadding ?? const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: double.infinity,
-              child: Text(
-                widget.translate != null
-                    ? widget.translate!(section.sectionField.displayLabel)
-                    : section.sectionField.displayLabel,
-                style:
-                    formStyle.sectionTitleStyle ??
-                    Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                maxLines: formStyle.sectionTitleMaxLines ?? 3,
-                overflow: TextOverflow.ellipsis,
-                softWrap: true,
+    return RepaintBoundary(
+      child: Card(
+        margin: formStyle.sectionMargin ?? const EdgeInsets.only(bottom: 16.0),
+        color: formStyle.sectionCardColor,
+        child: Padding(
+          padding: formStyle.sectionPadding ?? const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: double.infinity,
+                child: Text(
+                  widget.translate != null
+                      ? widget.translate!(section.sectionField.displayLabel)
+                      : section.sectionField.displayLabel,
+                  style:
+                      formStyle.sectionTitleStyle ??
+                      Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                  maxLines: formStyle.sectionTitleMaxLines ?? 3,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: true,
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            content,
-          ],
+              const SizedBox(height: 16),
+              content,
+            ],
+          ),
         ),
       ),
     );
