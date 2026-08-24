@@ -20,6 +20,22 @@ export 'src/models/link_filter_result.dart';
 // outbox UI without reaching into `src/` via implementation_imports.
 export 'src/models/outbox_row.dart'
     show OutboxRow, OutboxState, OutboxOperation, ErrorCode, ErrorCodeHelpers;
+// Attachment media. All three types are REQUIRED on the public surface, not
+// conveniences: `FormScreen.imagePickSource` takes a callback the host must
+// PRODUCE an `ImagePickSource` from, which no amount of inference can supply,
+// and `FrappeSDK.mediaStoreUsage()` returns a `MediaStoreUsage` a host cannot
+// otherwise store in a field or return from its own function.
+export 'src/models/image_pick_source.dart'
+    show ImagePickSource, ImagePickSourceHelpers;
+export 'src/models/media_store_usage.dart' show MediaStoreUsage;
+// `ResolveMediaFn` appears in the signature of `FieldFactory.createField`,
+// which is exported bare below and documented "Override this method to
+// customize field creation" — so a host that overrides it must NAME this type.
+// Exporting `field_factory.dart` does not carry the typedef: Dart re-exports a
+// library's own declarations and whatever it re-`export`s, never its imports,
+// and `field_factory.dart` only imports this one. Without this line the only
+// route is an `implementation_imports` violation.
+export 'src/services/media_resolver.dart' show ResolveMediaFn;
 
 // Database
 export 'src/database/app_database.dart';
@@ -57,6 +73,20 @@ export 'src/services/translation_service.dart';
 export 'src/services/sync_service.dart';
 export 'src/services/offline_repository.dart';
 export 'src/services/link_option_service.dart';
+export 'src/services/location_readiness.dart'
+    show
+        LocationReadiness,
+        checkDeviceLocationReadiness,
+        isLocationReady,
+        openDeviceLocationSettings,
+        openLocationAppSettings,
+        requestDeviceLocationPermission;
+export 'src/services/mobile_creation_capture.dart'
+    show
+        MobileCreationCapture,
+        PendingCreationMeta,
+        kCreationLocationSaveWait,
+        readDeviceLocationAsGeoJson;
 export 'src/services/link_field_coordinator.dart';
 export 'src/services/workflow_service.dart';
 
@@ -120,6 +150,16 @@ export 'src/constants/oauth_constants.dart';
 
 // Utilities (Frappe expression parity)
 export 'src/utils/depends_on_evaluator.dart' show DependsOnEvaluator;
+export 'src/ui/widgets/location_required_barrier.dart'
+    show LocationRequiredBarrier;
+export 'src/utils/geo_json.dart' show GeoPoint, geoJsonPoint, parseGeoJsonPoint;
+export 'src/utils/mobile_creation_stamp.dart'
+    show
+        declaresCreationMeta,
+        formatFrappeDatetime,
+        mobileCreatedAtField,
+        mobileLatitudeLongitudeField,
+        stampCreationMeta;
 
 // Query (UnifiedResolver + FilterParser) — Spec §6
 export 'src/query/filter_errors.dart'
