@@ -359,7 +359,12 @@ class _FormSection {
 }
 
 class _FormColumn {
+  /// The `Column Break` that opened this column, or null for a column the
+  /// layout synthesised because content appeared with no break before it.
+  final DocField? columnField;
   final List<DocField> fields = [];
+
+  _FormColumn([this.columnField]);
 }
 
 class _FrappeFormBuilderState extends State<FrappeFormBuilder>
@@ -669,40 +674,66 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// — i.e. the live `_tabs.length`, which is what the [TabController] length
   /// must match.
   ///
-  /// A plain count of `Tab Break` fields is NOT equivalent and must not be used
-  /// for the [didUpdateWidget] rebuild guard: [_buildFormStructure] skips
-  /// `hidden` fields (so a hidden Tab Break yields no tab) and synthesises an
-  /// implicit leading "Details" tab when content precedes the first Tab Break.
-  /// Counting raw Tab Break fields would miss both, letting the guard skip a
-  /// needed [TabController] rebuild and crash with a length/`_tabs` mismatch.
-  static int _effectiveTabCount(DocTypeMeta meta) {
-    var tabs = 0;
-    var sawContentBeforeFirstTab = false;
-    var inTab = false;
-    for (final field in meta.fields) {
-      if (field.hidden) continue;
-      final type = field.fieldtype;
-      if (type == FieldTypes.tabBreak) {
-        tabs++;
-        inTab = true;
-      } else if (type != FieldTypes.sectionBreak &&
-          type != FieldTypes.columnBreak) {
-        // A real content field outside any tab → implicit "Details" tab.
-        if (!inTab) sawContentBeforeFirstTab = true;
-      }
-    }
-    if (sawContentBeforeFirstTab) tabs++;
-    return tabs;
-  }
+  /// Delegates to [_buildTabsFor] rather than re-counting. A plain count of
+  /// `Tab Break` fields is NOT equivalent (the walk drops `hidden` tabs and
+  /// synthesises an implicit leading "Details" tab), and a second hand-kept
+  /// walk is exactly what previously let this drift out of lockstep: any
+  /// divergence lets the [didUpdateWidget] guard skip a needed [TabController]
+  /// rebuild and crash on a length/`_tabs` mismatch. One walk, one answer.
+  static int _effectiveTabCount(DocTypeMeta meta) => _buildTabsFor(meta).length;
 
-  void _buildFormStructure() {
-    _tabs.clear();
+  /// Builds the tab → section → column tree for [meta].
+  ///
+  /// Pure and static so [_effectiveTabCount] can ask for exactly the list
+  /// [_buildFormStructure] will install, instead of approximating it with a
+  /// parallel walk.
+  ///
+  /// **`hidden` on a layout break hides the CONTAINER; it does not dissolve the
+  /// BOUNDARY.** Frappe Desk builds its layout by dispatching on `fieldtype`
+  /// with no `hidden` filter at all (`layout.js` `render()`), so every
+  /// Tab/Section/Column Break constructs its container unconditionally
+  /// (`make_tab` / `make_section` / `make_column`, same file). Visibility is
+  /// applied afterwards, to the container: `tab.js`
+  /// (`hide = df.hidden || df.hidden_due_to_dependency`, which `layout.js`
+  /// then filters out of `visible_tabs`), and `section.js` / `column.js`
+  /// (`wrapper.toggleClass("hide-control", hide)`). Verified against Frappe
+  /// v16.17.5; these four call sites have had this shape since the tabbed
+  /// layout landed, so v15 behaves the same — though only v16 was read.
+  ///
+  /// Skipping a hidden break instead REPARENTS every field that follows it into
+  /// the previous container, where it silently inherits that container's
+  /// `depends_on` gate — a gate Desk never applies to it. It also disagrees
+  /// with the save-payload walk in `_handleSubmit`, which keys on `fieldtype`
+  /// alone (as Desk does) and therefore attributes those fields to the hidden
+  /// container. Same metadata, two different answers about which section a
+  /// field is in.
+  ///
+  /// **Scope: the boundary only.** A hidden container is still RENDERED here,
+  /// which Desk does not do — Desk hides the wrapper, so its children go with
+  /// it. Honouring that is a separate change and deliberately not bundled in,
+  /// because it is only safe once a doctype's metadata is consistent with it: a
+  /// `hidden: 1` Section Break that opens a form, or that encloses a `reqd`
+  /// field, currently relies on this widget rendering its contents. Dropping
+  /// those fields would empty the form, or block Save on a mandatory field the
+  /// user cannot reach. So this fixes the disagreement between the two walks
+  /// and leaves container visibility unimplemented — as it already was — rather
+  /// than half-implementing it.
+  static List<_FormTab> _buildTabsFor(DocTypeMeta meta) {
+    final tabs = <_FormTab>[];
     _FormTab? currentTab;
     _FormSection? currentSection;
     _FormColumn? currentColumn;
 
-    for (final field in widget.meta.fields) {
-      if (field.hidden) continue;
+    for (final field in meta.fields) {
+      // Layout breaks are NOT skipped when hidden — see the note above. Hidden
+      // DATA fields still are: Desk hides those too, and every downstream
+      // consumer here (`_fieldTabIndex`, the mandatory sweep) assumes a field
+      // present in the tree is one the user can reach.
+      final isLayoutBreak =
+          field.fieldtype == FieldTypes.tabBreak ||
+          field.fieldtype == FieldTypes.sectionBreak ||
+          field.fieldtype == FieldTypes.columnBreak;
+      if (field.hidden && !isLayoutBreak) continue;
 
       switch (field.fieldtype) {
         case FieldTypes.tabBreak:
@@ -718,7 +749,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             currentSection = null;
           }
           if (currentTab != null) {
-            _tabs.add(currentTab);
+            tabs.add(currentTab);
           }
           currentTab = _FormTab(field);
           currentSection = null;
@@ -747,7 +778,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             );
             currentSection.columns.add(currentColumn);
           }
-          currentColumn = _FormColumn();
+          currentColumn = _FormColumn(field);
           break;
 
         default:
@@ -774,8 +805,16 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       currentTab.sections.add(currentSection);
     }
     if (currentTab != null) {
-      _tabs.add(currentTab);
+      tabs.add(currentTab);
     }
+
+    return tabs;
+  }
+
+  void _buildFormStructure() {
+    _tabs
+      ..clear()
+      ..addAll(_buildTabsFor(widget.meta));
 
     // Build field -> tab index mapping for focusing invalid fields
     _fieldTabIndex.clear();
