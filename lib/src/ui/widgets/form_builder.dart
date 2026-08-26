@@ -923,6 +923,84 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       // An unparseable expression shows the field rather than hiding data.
       _evaluateDepends(field.dependsOn, true, onError: true);
 
+  /// Container visibility, matching Frappe Desk.
+  ///
+  /// Desk hides a layout container when its own `hidden` is set or its
+  /// `depends_on` is false, and the children go with the wrapper —
+  /// `Layout.refresh_dependency` (frappe/public/js/frappe/form/layout.js) walks
+  /// `fields_list.concat(this.tabs)`, stamps `hidden_due_to_dependency`, and
+  /// `BaseControl.get_status` then returns `"None"` for either flag. This
+  /// widget previously honoured only `depends_on`, and only on Section Breaks,
+  /// so a `hidden: 1` container still rendered its contents.
+  ///
+  /// Desk hides the WRAPPER; it does not prune the fields. Their values stay in
+  /// the document and are still submitted. This method is therefore only ever
+  /// consulted for RENDERING — `_buildCompleteFormData` and the save payload are
+  /// untouched, which is what makes honouring container visibility safe.
+  ///
+  /// ## The one deliberate divergence
+  ///
+  /// Frappe's server-side `_validate_mandatory` selects on `reqd` alone
+  /// (`frappe/model/base_document.py`: `self.meta.get("fields", {"reqd": ("=", 1)})`)
+  /// — it never consults `hidden` or `depends_on`. So a `reqd` field inside a
+  /// hidden container is still demanded by the server while Desk refuses to
+  /// show it: the document becomes unsaveable with no field to fix. Desk has
+  /// that flaw too; it is broken metadata rather than a rendering choice.
+  ///
+  /// Rather than reproduce a trap, a container that encloses a `reqd` field
+  /// with no value STAYS VISIBLE so the operator can satisfy the server. On
+  /// this project that is 33 fields across 6 doctypes, including three Gunny
+  /// Bag DO doctypes whose entire form sits inside a `hidden: 1` Section Break
+  /// at index 0 — strict parity would render them blank and unsaveable.
+  ///
+  /// The valve is deliberately narrow: it fires only when the field is BOTH
+  /// mandatory AND empty, so it cannot keep a container alive once the data is
+  /// there, and it disappears by itself the moment the metadata is corrected.
+  bool _shouldShowContainer(DocField container, Iterable<DocField> enclosed) {
+    final gatedOut =
+        container.hidden ||
+        !_evaluateDepends(container.dependsOn, true, onError: true);
+    if (!gatedOut) return true;
+
+    for (final f in enclosed) {
+      if (!f.isDataField) continue;
+      if (!_isFieldRequired(f)) continue;
+      if (_hasValueFor(f)) continue;
+      _warnUnsatisfiableContainer(container, f);
+      return true;
+    }
+    return false;
+  }
+
+  /// Whether [field] currently holds something the server would accept as a
+  /// value. Mirrors `has_content` in `base_document.py` closely enough for the
+  /// valve: empty string, null and empty list all count as missing.
+  bool _hasValueFor(DocField field) {
+    final name = field.fieldname;
+    if (name == null) return false;
+    final v = _controller?.valueOf(name).value ?? widget.initialData?[name];
+    if (v == null) return false;
+    if (v is String) return v.trim().isNotEmpty;
+    if (v is Iterable) return v.isNotEmpty;
+    if (v is Map) return v.isNotEmpty;
+    return true;
+  }
+
+  /// Logged once per container so a broken doctype is visible in the logs
+  /// rather than silently papered over.
+  static final Set<String> _warnedContainers = <String>{};
+  void _warnUnsatisfiableContainer(DocField container, DocField field) {
+    final key = '${widget.meta.name}.${container.fieldname}.${field.fieldname}';
+    if (!_warnedContainers.add(key)) return;
+    sdkLog(
+      'FormBuilder: ${widget.meta.name} — container "${container.fieldname}" is '
+      'hidden by metadata but encloses the mandatory, empty field '
+      '"${field.fieldname}". Keeping it visible: the server validates reqd '
+      'without consulting hidden, so hiding it would make the document '
+      'unsaveable with nothing to fix. Correct the doctype metadata.',
+    );
+  }
+
   bool _isFieldRequired(DocField field) =>
       field.reqd ||
       // NEVER become mandatory because an expression failed to parse — that
@@ -1449,32 +1527,38 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       parentFormData: effectiveParentFormData,
       getLinkFilterBuilder: widget.getLinkFilterBuilder,
       childTableFormBuilder: widget.getMeta != null
-          ? (childMeta, initialData, onSubmit, {registerSubmit}) =>
-                FrappeFormBuilder(
-                  meta: childMeta,
-                  initialData: initialData,
-                  onSubmit: onSubmit,
-                  registerSubmit: registerSubmit,
-                  getMeta: widget.getMeta,
-                  linkOptionService: widget.linkOptionService,
-                  useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
-                  uploadFile: widget.uploadFile,
-                  fileUrlBase: widget.fileUrlBase,
-                  imageHeaders: widget.imageHeaders,
-                  isOnline: widget.isOnline,
-                  pendingAttachmentPaths: widget.pendingAttachmentPaths,
-                  mediaResolver: widget.mediaResolver,
-                  isOfflineMode: widget.isOfflineMode,
-                  imagePickSource: widget.imagePickSource,
-                  // fetch linked document for child doctype.
-                  fetchLinkedDocument: widget.fetchLinkedDocument,
-                  translate: widget.translate,
-                  onButtonPressed: widget.onButtonPressed,
-                  onFieldChange: widget.onFieldChange,
-                  parentFormData: effectiveParentFormData,
-                  getLinkFilterBuilder: widget.getLinkFilterBuilder,
-                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
-                )
+          ? (
+              childMeta,
+              initialData,
+              onSubmit, {
+              registerSubmit,
+              bool readOnly = false,
+            }) => FrappeFormBuilder(
+              meta: childMeta,
+              initialData: initialData,
+              onSubmit: onSubmit,
+              registerSubmit: registerSubmit,
+              readOnly: readOnly,
+              getMeta: widget.getMeta,
+              linkOptionService: widget.linkOptionService,
+              useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+              uploadFile: widget.uploadFile,
+              fileUrlBase: widget.fileUrlBase,
+              imageHeaders: widget.imageHeaders,
+              isOnline: widget.isOnline,
+              pendingAttachmentPaths: widget.pendingAttachmentPaths,
+              mediaResolver: widget.mediaResolver,
+              isOfflineMode: widget.isOfflineMode,
+              imagePickSource: widget.imagePickSource,
+              // fetch linked document for child doctype.
+              fetchLinkedDocument: widget.fetchLinkedDocument,
+              translate: widget.translate,
+              onButtonPressed: widget.onButtonPressed,
+              onFieldChange: widget.onFieldChange,
+              parentFormData: effectiveParentFormData,
+              getLinkFilterBuilder: widget.getLinkFilterBuilder,
+              cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
+            )
           : null,
       onButtonPressed: widget.onButtonPressed,
       onChanged: (value) => _onFieldValueChanged(field, value),
@@ -1505,6 +1589,15 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   }
 
   Widget _buildColumn(_FormColumn column) {
+    // Column Break visibility, same Desk rule as sections. A hidden or
+    // gated-out column drops its fields from the RENDER only; they remain in
+    // the document and the save payload.
+    final columnField = column.columnField;
+    if (columnField != null &&
+        !_shouldShowContainer(columnField, column.fields)) {
+      return const SizedBox.shrink();
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: column.fields.map((field) => _buildFieldWidget(field)).toList(),
@@ -1552,8 +1645,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     if (section.columns.isEmpty) return const SizedBox.shrink();
 
-    // Evaluate section-level depends_on — hide entire section if condition is false
-    if (!_shouldShowField(section.sectionField)) {
+    // Section visibility, Desk-style: the section's own `hidden` AND its
+    // `depends_on`, with the mandatory-field valve described on
+    // [_shouldShowContainer]. Previously only `depends_on` was consulted, so a
+    // `hidden: 1` Section Break still rendered everything inside it.
+    if (!_shouldShowContainer(section.sectionField, [
+      for (final col in section.columns) ...col.fields,
+    ])) {
       return const SizedBox.shrink();
     }
 
@@ -2310,33 +2408,38 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           // disposes its controller on sheet close (add=create / delete=dispose
           // / reorder fall out of the List<map> model — no per-row machinery).
           childTableFormBuilder: widget.getMeta != null
-              ? (childMeta, initialData, onSubmit, {registerSubmit}) =>
-                    FrappeFormBuilder(
-                      mode: FormBuilderMode.reactive,
-                      meta: childMeta,
-                      initialData: initialData,
-                      onSubmit: onSubmit,
-                      registerSubmit: registerSubmit,
-                      getMeta: widget.getMeta,
-                      linkOptionService: widget.linkOptionService,
-                      useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
-                      uploadFile: widget.uploadFile,
-                      fileUrlBase: widget.fileUrlBase,
-                      imageHeaders: widget.imageHeaders,
-                      isOnline: widget.isOnline,
-                      pendingAttachmentPaths: widget.pendingAttachmentPaths,
-                      mediaResolver: widget.mediaResolver,
-                      isOfflineMode: widget.isOfflineMode,
-                      imagePickSource: widget.imagePickSource,
-                      fetchLinkedDocument: widget.fetchLinkedDocument,
-                      translate: widget.translate,
-                      onButtonPressed: widget.onButtonPressed,
-                      onFieldChange: widget.onFieldChange,
-                      parentFormData: widget.parentFormData ?? c.values,
-                      getLinkFilterBuilder: widget.getLinkFilterBuilder,
-                      cascadeProgrammaticChanges:
-                          widget.cascadeProgrammaticChanges,
-                    )
+              ? (
+                  childMeta,
+                  initialData,
+                  onSubmit, {
+                  registerSubmit,
+                  bool readOnly = false,
+                }) => FrappeFormBuilder(
+                  mode: FormBuilderMode.reactive,
+                  meta: childMeta,
+                  initialData: initialData,
+                  onSubmit: onSubmit,
+                  registerSubmit: registerSubmit,
+                  readOnly: readOnly,
+                  getMeta: widget.getMeta,
+                  linkOptionService: widget.linkOptionService,
+                  useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                  uploadFile: widget.uploadFile,
+                  fileUrlBase: widget.fileUrlBase,
+                  imageHeaders: widget.imageHeaders,
+                  isOnline: widget.isOnline,
+                  pendingAttachmentPaths: widget.pendingAttachmentPaths,
+                  mediaResolver: widget.mediaResolver,
+                  isOfflineMode: widget.isOfflineMode,
+                  imagePickSource: widget.imagePickSource,
+                  fetchLinkedDocument: widget.fetchLinkedDocument,
+                  translate: widget.translate,
+                  onButtonPressed: widget.onButtonPressed,
+                  onFieldChange: widget.onFieldChange,
+                  parentFormData: widget.parentFormData ?? c.values,
+                  getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
+                )
               : null,
         );
         if (w == null) return const SizedBox.shrink();

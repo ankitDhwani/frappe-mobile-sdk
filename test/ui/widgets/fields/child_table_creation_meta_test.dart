@@ -41,6 +41,7 @@ void main() {
     Map<String, dynamic>? initialData,
     void Function(Map<String, dynamic>) onSubmit, {
     void Function(void Function() submit)? registerSubmit,
+    bool readOnly = false,
   }) => ElevatedButton(
     onPressed: () => onSubmit({'item_name': 'item 1'}),
     child: const Text('SubmitRow'),
@@ -184,6 +185,7 @@ void main() {
     Map<String, dynamic>? initialData,
     void Function(Map<String, dynamic>) onSubmit, {
     void Function(void Function() submit)? registerSubmit,
+    bool readOnly = false,
   }) => FrappeFormBuilder(
     meta: childMeta,
     initialData: initialData,

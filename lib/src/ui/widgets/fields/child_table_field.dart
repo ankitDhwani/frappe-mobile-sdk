@@ -32,6 +32,7 @@ typedef ChildTableFormBuilder =
       Map<String, dynamic>? initialData,
       void Function(Map<String, dynamic>) onSubmit, {
       void Function(void Function() submit)? registerSubmit,
+      bool readOnly,
     });
 
 /// Widget for Table (child table) field type.
@@ -132,9 +133,12 @@ class ChildTableField extends StatelessWidget {
                           },
                         )
                       : null,
-                  onTap: enabled && !field.readOnly && onChanged != null
-                      ? () => _showEditRowDialog(context, index, listValue, row)
-                      : null,
+                  onTap: () {
+                    final isReadOnly =
+                        !enabled || field.readOnly || onChanged == null;
+                    _showRowDialog(context, index, listValue, row,
+                        isReadOnly: isReadOnly);
+                  },
                 ),
               );
             },
@@ -302,15 +306,16 @@ class ChildTableField extends StatelessWidget {
     );
   }
 
-  Future<void> _showEditRowDialog(
+  Future<void> _showRowDialog(
     BuildContext context,
     int index,
     List<dynamic> listValue,
-    Map<String, dynamic> rowData,
-  ) async {
+    Map<String, dynamic> rowData, {
+    bool isReadOnly = false,
+  }) async {
     if (getMeta == null ||
         field.options == null ||
-        onChanged == null ||
+        (onChanged == null && !isReadOnly) ||
         formBuilder == null) {
       return;
     }
@@ -320,7 +325,7 @@ class ChildTableField extends StatelessWidget {
       childMeta = await getMeta!(field.options!);
     } catch (e, st) {
       debugPrint(
-        'ChildTableField._showEditRowDialog: getMeta(${field.options}) failed — $e\n$st',
+        'ChildTableField._showRowDialog: getMeta(${field.options}) failed — $e\n$st',
       );
       if (context.mounted) {
         // Original called the bare `SnackBar(content: Text(...))` with no
@@ -336,25 +341,26 @@ class ChildTableField extends StatelessWidget {
       isScrollControlled: true,
       useSafeArea: true,
       builder: (ctx) => _ChildTableSheet(
-        title: 'Edit ${field.options}',
+        title: isReadOnly ? 'View ${field.options}' : 'Edit ${field.options}',
         childMeta: childMeta!,
         initialData: rowData,
-        isEdit: true,
+        isEdit: !isReadOnly,
+        isReadOnly: isReadOnly,
         formBuilder: formBuilder!,
-        onSubmit: (data) {
+        onSubmit: isReadOnly ? (_) {} : (data) {
           Navigator.pop(ctx);
           final newList = List<dynamic>.from(listValue);
           // Carry the row's local identity (mobile_uuid / name) across the
           // edit — the child form does not render those columns and would
           // otherwise drop them, orphaning any queued attachment row.
           newList[index] = preserveChildIdentity(rowData, data);
-          onChanged!(newList);
+          onChanged?.call(newList);
         },
-        onRemove: () {
+        onRemove: isReadOnly ? null : () {
           Navigator.pop(ctx);
           final newList = List<dynamic>.from(listValue);
           newList.removeAt(index);
-          onChanged!(newList);
+          onChanged?.call(newList);
         },
       ),
     );
@@ -368,6 +374,7 @@ class _ChildTableSheet extends StatefulWidget {
     required this.childMeta,
     required this.initialData,
     required this.isEdit,
+    this.isReadOnly = false,
     required this.formBuilder,
     required this.onSubmit,
     required this.onRemove,
@@ -377,6 +384,7 @@ class _ChildTableSheet extends StatefulWidget {
   final DocTypeMeta childMeta;
   final Map<String, dynamic>? initialData;
   final bool isEdit;
+  final bool isReadOnly;
   final ChildTableFormBuilder formBuilder;
   final void Function(Map<String, dynamic>) onSubmit;
   final void Function()? onRemove;
@@ -429,12 +437,15 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
                 widget.childMeta,
                 widget.initialData,
                 (data) => widget.onSubmit(data),
-                registerSubmit: (fn) {
-                  _submitFn = fn;
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (mounted) setState(() {});
-                  });
-                },
+                registerSubmit: widget.isReadOnly
+                    ? null
+                    : (fn) {
+                        _submitFn = fn;
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted) setState(() {});
+                        });
+                      },
+                readOnly: widget.isReadOnly,
               ),
             ),
             const Divider(height: 1),
@@ -443,7 +454,9 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                 child: Row(
                   children: [
-                    if (widget.isEdit && widget.onRemove != null)
+                    if (widget.isEdit &&
+                        widget.onRemove != null &&
+                        !widget.isReadOnly)
                       TextButton.icon(
                         onPressed: () => widget.onRemove!(),
                         icon: const Icon(Icons.delete_outline, size: 20),
@@ -452,30 +465,40 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
                           foregroundColor: Colors.red,
                         ),
                       ),
-                    if (widget.isEdit && widget.onRemove != null)
+                    if (widget.isEdit &&
+                        widget.onRemove != null &&
+                        !widget.isReadOnly)
                       const SizedBox(width: 8),
                     const Spacer(),
-                    TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: const Text('Cancel'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton.icon(
-                      onPressed: _submitFn != null ? () => _submitFn!() : null,
-                      icon: _submitFn != null
-                          ? const Icon(Icons.check, size: 20)
-                          : const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  Colors.white,
+                    if (widget.isReadOnly)
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Close'),
+                      )
+                    else ...[
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Cancel'),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton.icon(
+                        onPressed:
+                            _submitFn != null ? () => _submitFn!() : null,
+                        icon: _submitFn != null
+                            ? const Icon(Icons.check, size: 20)
+                            : const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
                                 ),
                               ),
-                            ),
-                      label: const Text('Save'),
-                    ),
+                        label: const Text('Save'),
+                      ),
+                    ],
                   ],
                 ),
               ),
