@@ -79,63 +79,71 @@ void main() {
         initialData: const {'gate': 0, 'after': 'typed'},
       );
 
-      expect(
-        find.text('After Break'),
-        findsOneWidget,
-        reason:
-            '`after` belongs to `sec_hidden`, which carries no depends_on. It '
-            'must not be gated by the section before it.',
-      );
+      // `after` belongs to `sec_hidden`, which carries no depends_on, so it
+      // must not be gated by the section before it. Container visibility now
+      // hides `sec_hidden` itself (Desk parity), so VISIBILITY can no longer
+      // stand in for correct parenting — a reparented field and a correctly
+      // parented one are both off-screen here.
+      //
+      // The PAYLOAD is the discriminator, and it is the stronger assertion:
+      // reparented into the gated `sec_gated`, `after` would be dropped by the
+      // depends_on sweep in `_handleSubmit`. Surviving with its typed value
+      // proves it is attributed to `sec_hidden`, which is exactly the
+      // render/payload agreement issue #109 was about.
       expect(find.text('Inside'), findsNothing, reason: 'sec_gated is false');
-      // And the payload agrees — which it already did. That was the divergence.
       expect(submitted, isNotNull);
-      expect(submitted!['after'], 'typed');
-    },
-  );
-
-  testWidgets(
-    'a reqd field after a hidden Section Break stays reachable',
-    (tester) async {
-      // The shape that makes this urgent: a mandatory field enclosed by a
-      // hidden Section Break, with a gated section before it. Reparented, the
-      // field is invisible but still swept as mandatory — Save blocks on a
-      // field the user cannot see or fill.
-      final meta = DocTypeMeta(
-        name: 'T',
-        fields: [
-          DocField(
-            fieldname: 'sec_gated',
-            fieldtype: 'Section Break',
-            label: 'Gated',
-            dependsOn: 'eval:doc.gate == 1',
-          ),
-          DocField(fieldname: 'inside', fieldtype: 'Data', label: 'Inside'),
-          DocField(
-            fieldname: 'sec_hidden',
-            fieldtype: 'Section Break',
-            label: 'Hidden Section',
-            hidden: true,
-          ),
-          DocField(
-            fieldname: 'must_fill',
-            fieldtype: 'Data',
-            label: 'Must Fill',
-            reqd: true,
-          ),
-        ],
-      );
-
-      await pumpAndSubmit(tester, meta, initialData: const {'gate': 0});
-
       expect(
-        find.text('Must Fill'),
-        findsOneWidget,
+        submitted!['after'],
+        'typed',
         reason:
-            'a mandatory field the save path validates must be one the form '
-            'actually draws',
+            '`after` must be attributed to `sec_hidden` (no depends_on), not '
+            'reparented into the gated section before it.',
       );
     },
   );
+
+  testWidgets('a reqd field after a hidden Section Break stays reachable', (
+    tester,
+  ) async {
+    // The shape that makes this urgent: a mandatory field enclosed by a
+    // hidden Section Break, with a gated section before it. Reparented, the
+    // field is invisible but still swept as mandatory — Save blocks on a
+    // field the user cannot see or fill.
+    final meta = DocTypeMeta(
+      name: 'T',
+      fields: [
+        DocField(
+          fieldname: 'sec_gated',
+          fieldtype: 'Section Break',
+          label: 'Gated',
+          dependsOn: 'eval:doc.gate == 1',
+        ),
+        DocField(fieldname: 'inside', fieldtype: 'Data', label: 'Inside'),
+        DocField(
+          fieldname: 'sec_hidden',
+          fieldtype: 'Section Break',
+          label: 'Hidden Section',
+          hidden: true,
+        ),
+        DocField(
+          fieldname: 'must_fill',
+          fieldtype: 'Data',
+          label: 'Must Fill',
+          reqd: true,
+        ),
+      ],
+    );
+
+    await pumpAndSubmit(tester, meta, initialData: const {'gate': 0});
+
+    expect(
+      find.text('Must Fill'),
+      findsOneWidget,
+      reason:
+          'a mandatory field the save path validates must be one the form '
+          'actually draws',
+    );
+  });
 
   testWidgets(
     'a hidden Tab Break does not merge its fields into the previous tab',
@@ -157,7 +165,11 @@ void main() {
 
       await pumpAndSubmit(tester, meta, initialData: const {'x': 'X'});
 
-      expect(tester.takeException(), isNull, reason: 'no TabController mismatch');
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: 'no TabController mismatch',
+      );
       expect(find.text('Visible X'), findsOneWidget);
       expect(
         find.text('After Break'),
