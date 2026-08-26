@@ -2452,6 +2452,66 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     );
   }
 
+  /// Last-resort rendering when the metadata yields no fields.
+  ///
+  /// `_buildTabsFor` produces no tabs when every data field is `hidden` or the
+  /// meta is empty — a stale/partial local meta row is the usual cause (see
+  /// `MetaService.getMeta`, which now treats an empty cached meta as a miss).
+  /// The values we were given are still real, so display them read-only and say
+  /// plainly that the layout is unavailable, instead of showing nothing.
+  Widget _buildMetalessFallback() {
+    final data = <String, dynamic>{...?widget.initialData, ..._formData}
+      ..removeWhere(
+        (k, v) =>
+            k.startsWith('__') ||
+            const {
+              'doctype',
+              'parent',
+              'parenttype',
+              'parentfield',
+              'idx',
+              'owner',
+              'creation',
+              'modified',
+              'modified_by',
+              'docstatus',
+              'name',
+            }.contains(k) ||
+            v == null ||
+            (v is String && v.trim().isEmpty) ||
+            (v is Iterable && v.isEmpty),
+      );
+
+    if (data.isEmpty) {
+      return const Center(child: Text('No fields to display'));
+    }
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Text(
+            'Layout unavailable — showing stored values.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        for (final e in data.entries)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(e.key, style: Theme.of(context).textTheme.labelSmall),
+                const SizedBox(height: 2),
+                Text('${e.value}'),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Drop the per-build eval-data memo. Safe as a build-scoped cache because
@@ -2461,7 +2521,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // go through setState, which lands here again before anything re-reads it.
     _resetEvalDataCache();
     if (_tabs.isEmpty) {
-      return const Center(child: Text('No fields to display'));
+      // The metadata produced nothing renderable. Rather than a dead end, show
+      // whatever values we were handed — a read-only child-table sheet passes
+      // the row itself as `initialData`, so the operator can still READ the
+      // record they tapped. Losing the data behind "No fields to display" is
+      // what made this look like a broken feature rather than a missing meta.
+      return _buildMetalessFallback();
     }
     final formStyle = widget.style ?? DefaultFormStyle.standard;
 
