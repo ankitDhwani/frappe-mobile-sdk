@@ -1097,7 +1097,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   ) {
     var decoration = formStyle.fieldDecoration?.call(field);
     if (widget.translate != null && decoration != null) {
-      final labelText = widget.translate!(field.label ?? field.fieldname ?? '');
+      final labelText = widget.translate!(field.displayLabel);
       decoration = decoration.copyWith(
         // When showFieldLabel=true, BaseField renders the external label above
         // the box; setting labelText here would produce a second floating label

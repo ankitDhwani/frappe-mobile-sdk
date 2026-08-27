@@ -74,7 +74,13 @@ class ChildTableField extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                field.label ?? field.fieldname ?? 'Table',
+                // `displayLabel`, not `label ?? fieldname`: server metadata
+                // routinely omits a label on child Table fields, and the raw
+                // fieldname then becomes the heading an operator reads —
+                // "assaying_parameters" instead of "Assaying Parameters".
+                // `??` also cannot catch a label that is present but empty or
+                // zero-width, which `displayLabel` handles.
+                field.displayLabel.isEmpty ? 'Table' : field.displayLabel,
                 style: Theme.of(context).textTheme.titleMedium,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
@@ -136,8 +142,13 @@ class ChildTableField extends StatelessWidget {
                   onTap: () {
                     final isReadOnly =
                         !enabled || field.readOnly || onChanged == null;
-                    _showRowDialog(context, index, listValue, row,
-                        isReadOnly: isReadOnly);
+                    _showRowDialog(
+                      context,
+                      index,
+                      listValue,
+                      row,
+                      isReadOnly: isReadOnly,
+                    );
                   },
                 ),
               );
@@ -347,21 +358,25 @@ class ChildTableField extends StatelessWidget {
         isEdit: !isReadOnly,
         isReadOnly: isReadOnly,
         formBuilder: formBuilder!,
-        onSubmit: isReadOnly ? (_) {} : (data) {
-          Navigator.pop(ctx);
-          final newList = List<dynamic>.from(listValue);
-          // Carry the row's local identity (mobile_uuid / name) across the
-          // edit — the child form does not render those columns and would
-          // otherwise drop them, orphaning any queued attachment row.
-          newList[index] = preserveChildIdentity(rowData, data);
-          onChanged?.call(newList);
-        },
-        onRemove: isReadOnly ? null : () {
-          Navigator.pop(ctx);
-          final newList = List<dynamic>.from(listValue);
-          newList.removeAt(index);
-          onChanged?.call(newList);
-        },
+        onSubmit: isReadOnly
+            ? (_) {}
+            : (data) {
+                Navigator.pop(ctx);
+                final newList = List<dynamic>.from(listValue);
+                // Carry the row's local identity (mobile_uuid / name) across the
+                // edit — the child form does not render those columns and would
+                // otherwise drop them, orphaning any queued attachment row.
+                newList[index] = preserveChildIdentity(rowData, data);
+                onChanged?.call(newList);
+              },
+        onRemove: isReadOnly
+            ? null
+            : () {
+                Navigator.pop(ctx);
+                final newList = List<dynamic>.from(listValue);
+                newList.removeAt(index);
+                onChanged?.call(newList);
+              },
       ),
     );
   }
@@ -482,8 +497,9 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
                       ),
                       const SizedBox(width: 8),
                       FilledButton.icon(
-                        onPressed:
-                            _submitFn != null ? () => _submitFn!() : null,
+                        onPressed: _submitFn != null
+                            ? () => _submitFn!()
+                            : null,
                         icon: _submitFn != null
                             ? const Icon(Icons.check, size: 20)
                             : const SizedBox(
