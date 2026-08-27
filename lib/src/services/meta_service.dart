@@ -430,11 +430,25 @@ class MetaService {
                   existing.serverModifiedAt!,
                 ));
 
-        // Update existing entry with mobile form info
+        // Update existing entry with mobile form info.
+        //
+        // `serverModifiedAt` is deliberately PRESERVED here, not advanced to
+        // `mfn.doctypeMetaModifiedAt`. This row is about to be queued for a
+        // re-fetch that can fail — 401, 417 and transport errors are all live
+        // on this wire, and the fetch loop below catches per doctype and
+        // continues. Advancing the stamp now would mark the doctype fresh while
+        // it still holds the OLD `metaJson`: on the next launch the server's
+        // stamp equals the row's, `needsSync` is false, `metaJson` is non-empty
+        // so the placeholder escape hatch does not fire either, and the doctype
+        // is stale FOREVER — one transient network blip permanently poisons it.
+        //
+        // The stamp is advanced by `resyncMobileConfiguration` only after
+        // `fetchAndStoreInDb` has actually returned, via
+        // `doctypeMetaDao.setServerModifiedAt`.
         final updatedMeta = DoctypeMetaEntity(
           doctype: doctype,
           modified: existing.modified,
-          serverModifiedAt: mfn.doctypeMetaModifiedAt,
+          serverModifiedAt: existing.serverModifiedAt,
           isMobileForm: true,
           metaJson: existing.metaJson,
           groupName: mfn.groupName,
@@ -639,8 +653,18 @@ class MetaService {
       // Update mobile form doctypes and get list of doctypes to sync
       final doctypesToSync = await _updateMobileFormDoctypes(scopedFormNames);
 
-      // Sync all doctypes that need updating
+      // Sync all doctypes that need updating.
+      //
+      // The staleness stamp is advanced HERE, per doctype, and only once the
+      // fetch has actually landed — see the note in `_updateMobileFormDoctypes`
+      // on why writing it at queue time permanently poisons a row whose fetch
+      // fails. A doctype that throws keeps its OLD stamp, so the next launch
+      // sees the server's newer stamp and queues it again.
       if (doctypesToSync.isNotEmpty) {
+        final stampFor = <String, String?>{
+          for (final m in scopedFormNames)
+            m.mobileDoctype: m.doctypeMetaModifiedAt,
+        };
         for (final doctype in doctypesToSync) {
           try {
             await fetchAndStoreInDb(doctype);
@@ -650,6 +674,10 @@ class MetaService {
             );
             onMetaSyncFailure?.call(doctype, e);
             continue;
+          }
+          final stamp = stampFor[doctype];
+          if (stamp != null && stamp.isNotEmpty) {
+            await _database.doctypeMetaDao.setServerModifiedAt(doctype, stamp);
           }
         }
       }
