@@ -408,7 +408,17 @@ class MetaService {
       final existing = await _database.doctypeMetaDao.findByDoctype(doctype);
 
       if (existing != null) {
-        // Check if timestamp is newer
+        // Has the server's mobile-config stamp for this doctype MOVED since
+        // the last time we recorded it?
+        //
+        // This is deliberately server-vs-server. `doctype_meta_modified_at`
+        // and the row's `modified` are NOT the same clock and must never be
+        // compared: `modified` is the DocType document's own timestamp (from
+        // `getdoctype`'s `docs[0].modified`), while `doctype_meta_modified_at`
+        // tracks the mobile configuration for that doctype. In practice they
+        // sit 47 minutes apart for `Farmer Registration` and FOURTEEN MONTHS
+        // apart for `State`, so a cross-clock comparison reports every doctype
+        // as permanently stale and re-fetches all of them on every launch.
         final serverModifiedAt = mfn.doctypeMetaModifiedAt;
         final needsSync =
             serverModifiedAt != null &&

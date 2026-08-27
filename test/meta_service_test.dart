@@ -322,6 +322,72 @@ void main() {
         expect(survey?.isMobileForm, isFalse);
       },
     );
+
+    // Regression: `serverModifiedAt` IS the staleness signal. A newer stamp
+    // from the server must queue a re-fetch — login used to advance this
+    // column while keeping the old `metaJson`, equalising the two values
+    // before anything compared them, which left QA seeing mobile forms
+    // rendering fields nine hours behind the web desk.
+    test('a NEWER server stamp queues a re-fetch', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final metaService = MetaService(FrappeClient('https://fake.test'), db);
+
+      await db.doctypeMetaDao.insertDoctypeMeta(
+        DoctypeMetaEntity(
+          doctype: 'Sales Order',
+          modified: '2026-08-26 13:53:34',
+          serverModifiedAt: '2026-08-26 13:53:34',
+          isMobileForm: true,
+          metaJson: '{"fields":[{"fieldname":"a","fieldtype":"Data"}]}',
+          groupName: 'Farmer',
+          sortOrder: 0,
+        ),
+      );
+
+      final toSync = await metaService.updateMobileFormDoctypesForTest([
+        const MobileFormName(
+          mobileDoctype: 'Sales Order',
+          groupName: 'Farmer',
+          doctypeMetaModifiedAt: '2026-08-26 22:42:50',
+          doctypeIcon: null,
+        ),
+      ]);
+
+      expect(toSync, contains('Sales Order'));
+    });
+
+    // Guards the OTHER direction: `modified` is the DocType document's own
+    // timestamp and runs on a DIFFERENT clock from the mobile-config stamp
+    // (observed months apart on some doctypes). Letting it leak into the
+    // decision reports every doctype as permanently stale and re-fetches all
+    // of them on every launch.
+    test('an older `modified` is NOT staleness — different clock', () async {
+      final db = await AppDatabase.inMemoryDatabase();
+      final metaService = MetaService(FrappeClient('https://fake.test'), db);
+
+      await db.doctypeMetaDao.insertDoctypeMeta(
+        DoctypeMetaEntity(
+          doctype: 'State',
+          modified: '2025-06-24 14:52:59',
+          serverModifiedAt: '2026-08-26 22:43:00',
+          isMobileForm: true,
+          metaJson: '{"fields":[{"fieldname":"a","fieldtype":"Data"}]}',
+          groupName: 'Masters',
+          sortOrder: 0,
+        ),
+      );
+
+      final toSync = await metaService.updateMobileFormDoctypesForTest([
+        const MobileFormName(
+          mobileDoctype: 'State',
+          groupName: 'Masters',
+          doctypeMetaModifiedAt: '2026-08-26 22:43:00',
+          doctypeIcon: null,
+        ),
+      ]);
+
+      expect(toSync, isNot(contains('State')));
+    });
   });
 
   group('MetaService.getMobileFormGroups', () {
