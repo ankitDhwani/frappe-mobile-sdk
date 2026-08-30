@@ -424,6 +424,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// here and [ChildTableField] renders it; cleared on the next edit.
   final Map<String, String> _tableFieldErrors = {};
 
+  /// Child-doctype meta for every `Table` field, keyed by child doctype name.
+  ///
+  /// The mandatory sweep in [_handleSubmit] is SYNCHRONOUS and `getMeta` is
+  /// not, so a row-level check has to read from a cache warmed at init. A
+  /// doctype missing from this map is SKIPPED, never treated as invalid —
+  /// "we could not load the meta" is not "the row is incomplete".
+  final Map<String, DocTypeMeta> _childRowMeta = {};
+
   /// Field types whose widget surfaces a required-empty error through
   /// [_tableFieldErrors] rather than `FormBuilderState.fields[…].invalidate()`
   /// — neither is a `FormBuilderField`, so `invalidate()` is a silent no-op.
@@ -521,6 +529,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         }
       }
     }
+
+    _prefetchChildRowMeta();
 
     if (widget.linkOptionService != null && widget.useLinkFieldCoordinator) {
       _linkFieldCoordinator = LinkFieldCoordinator(
@@ -2243,7 +2253,133 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       return;
     }
 
+    // Row-level mandatory cells, which no layer above can see: the parent
+    // sweep judges a `Table` only by whether the LIST is empty.
+    final childRowErrors = _missingChildRowMandatories(
+      completeFormData,
+      dataForDepends,
+    );
+    if (childRowErrors.isNotEmpty) {
+      final firstTable = childRowErrors.keys.first;
+      final tabIndex = _fieldTabIndex[firstTable];
+      if (tabIndex != null &&
+          _tabs.length > 1 &&
+          _tabController.index != tabIndex) {
+        setState(() {
+          _tabController.index = tabIndex;
+        });
+      }
+      setState(() {
+        _tableFieldErrors
+          ..clear()
+          ..addAll(childRowErrors);
+      });
+      widget.onValidationFailed?.call();
+      return;
+    }
+
     widget.onSubmit?.call(completeFormData);
+  }
+
+  /// Warms [_childRowMeta] for every `Table` field so the submit-time row
+  /// sweep can run synchronously. Failures are swallowed on purpose: a table
+  /// whose meta never arrives is simply not row-checked.
+  void _prefetchChildRowMeta() {
+    final getMeta = widget.getMeta;
+    if (getMeta == null) return;
+    for (final field in widget.meta.fields) {
+      if (field.fieldtype != 'Table') continue;
+      final child = field.options;
+      if (child == null || child.isEmpty) continue;
+      if (_childRowMeta.containsKey(child)) continue;
+      // `getMeta` is host-supplied and may throw SYNCHRONOUSLY — the app's
+      // closure reaches a service that is absent in widget tests and raises
+      // before any Future exists, so `.catchError` never sees it and the
+      // exception escapes initState into the widget tree. try/catch first,
+      // then catchError for the async half.
+      try {
+        getMeta(child)
+            .then((m) {
+              if (!mounted) return;
+              _childRowMeta[child] = m;
+            })
+            .catchError((_) {});
+      } catch (_) {
+        // Meta unavailable -> this table is simply not row-checked.
+      }
+    }
+  }
+
+  /// Mandatory cells INSIDE child-table rows, as "Row #N: Label is required".
+  ///
+  /// The parent sweep in [_handleSubmit] asks only `v is List && v.isEmpty` of
+  /// a `Table` field, so a table holding rows whose mandatory cells are empty
+  /// is "non-empty" and passes every client-side check. It is then refused by
+  /// the server as a `MandatoryError` naming the child doctype and row number
+  /// — text no client layer can map back to a widget, so nothing can switch
+  /// tab or scroll to the offending cell.
+  ///
+  /// This is easy to hit whenever a client script seeds child rows from a
+  /// server lookup with their value columns left null: the rows exist, the
+  /// list is non-empty, and the operator gets no asterisk and no inline error
+  /// anywhere in the form.
+  ///
+  /// Returns table-fieldname -> message, ready for [_tableFieldErrors].
+  Map<String, String> _missingChildRowMandatories(
+    Map<String, dynamic> completeFormData,
+    Map<String, dynamic> dataForDepends,
+  ) {
+    final out = <String, String>{};
+    for (final field in widget.meta.fields) {
+      if (field.fieldtype != 'Table') continue;
+      final name = field.fieldname;
+      final child = field.options;
+      if (name == null || child == null || field.hidden) continue;
+      final childMeta = _childRowMeta[child];
+      if (childMeta == null) continue; // meta unknown -> do not judge the rows
+      final rows = completeFormData[name];
+      if (rows is! List || rows.isEmpty) continue;
+
+      for (var i = 0; i < rows.length; i++) {
+        final row = rows[i];
+        if (row is! Map) continue;
+        for (final cf in childMeta.fields) {
+          final cn = cf.fieldname;
+          if (cn == null || cn.isEmpty) continue;
+          if (cf.hidden || !cf.isDataField) continue;
+          var required = cf.reqd;
+          if (!required &&
+              cf.mandatoryDependsOn != null &&
+              cf.mandatoryDependsOn!.isNotEmpty) {
+            // The ROW is the data for a child field's condition; the parent
+            // form is its `parentData`. `defaultOnError: false` matches the
+            // parent sweep — an unparseable expression must not invent a
+            // requirement the widget never drew an asterisk for.
+            required = DependsOnEvaluator.evaluate(
+              cf.mandatoryDependsOn,
+              Map<String, dynamic>.from(row),
+              parentData: dataForDepends,
+              defaultOnError: false,
+            );
+          }
+          if (!required) continue;
+          final v = row[cn];
+          final missing =
+              v == null ||
+              (v is String && v.trim().isEmpty) ||
+              (v is List && v.isEmpty);
+          if (!missing) continue;
+          // The first offender per table is enough to steer the operator there.
+          out[name] =
+              '${field.displayLabel} '
+              'Row #${i + 1}: '
+              '${sdkTr('{0} is required', [cf.displayLabel])}';
+          break;
+        }
+        if (out.containsKey(name)) break;
+      }
+    }
+    return out;
   }
 
   /// Assembles the full form data map: every non-hidden data field with
