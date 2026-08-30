@@ -2292,12 +2292,21 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       final child = field.options;
       if (child == null || child.isEmpty) continue;
       if (_childRowMeta.containsKey(child)) continue;
-      getMeta(child)
-          .then((m) {
-            if (!mounted) return;
-            _childRowMeta[child] = m;
-          })
-          .catchError((_) {});
+      // `getMeta` is host-supplied and may throw SYNCHRONOUSLY — the app's
+      // closure reaches a service that is absent in widget tests and raises
+      // before any Future exists, so `.catchError` never sees it and the
+      // exception escapes initState into the widget tree. try/catch first,
+      // then catchError for the async half.
+      try {
+        getMeta(child)
+            .then((m) {
+              if (!mounted) return;
+              _childRowMeta[child] = m;
+            })
+            .catchError((_) {});
+      } catch (_) {
+        // Meta unavailable -> this table is simply not row-checked.
+      }
     }
   }
 
