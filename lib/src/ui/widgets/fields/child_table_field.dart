@@ -4,6 +4,7 @@ import '../../../models/doc_type_meta.dart';
 import '../../../services/mobile_creation_capture.dart';
 import '../../../utils/mobile_creation_stamp.dart';
 import '../screen_helpers.dart';
+import 'child_table_cells.dart';
 
 /// Preserves the identity/system columns a child form does not render (e.g.
 /// `mobile_uuid`, `name`) from the pre-edit [original] row onto the
@@ -46,6 +47,9 @@ class ChildTableField extends StatelessWidget {
   final ChildTableFormBuilder? formBuilder;
   final String? errorText;
 
+  /// Resolves a Link cell to the linked document's title. Null renders raw ids.
+  final LinkTitleResolver? resolveLinkTitle;
+
   /// Captures a NEW row's `mobile_created_at` / `mobile_latitude_longitude`
   /// when Add Row is tapped. Null disables row-level capture entirely.
   final MobileCreationCapture? creationCapture;
@@ -59,6 +63,7 @@ class ChildTableField extends StatelessWidget {
     this.getMeta,
     this.formBuilder,
     this.errorText,
+    this.resolveLinkTitle,
     this.creationCapture,
   });
 
@@ -122,13 +127,30 @@ class ChildTableField extends StatelessWidget {
               return Card(
                 margin: const EdgeInsets.only(bottom: 8),
                 child: ListTile(
-                  title: FutureBuilder<String>(
-                    future: _rowTitle(row),
-                    builder: (_, snap) => Text(snap.data ?? '…'),
+                  title: FutureBuilder<_RowDisplay>(
+                    future: _rowDisplay(row, index),
+                    builder: (context, snap) {
+                      final d = snap.data;
+                      if (d == null) return const Text('…');
+                      if (d.cells.isNotEmpty) return _cellsColumn(d.cells);
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(d.title),
+                          if (d.subtitle.isNotEmpty)
+                            Text(
+                              d.subtitle,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                        ],
+                      );
+                    },
                   ),
-                  subtitle: _rowSubtitle(row).isNotEmpty
-                      ? Text(_rowSubtitle(row))
-                      : null,
+                  // The declared columns already carry the values a subtitle
+                  // would repeat, so it is folded into the title builder above
+                  // and rendered only when the child declares no columns.
+                  subtitle: null,
                   trailing: enabled && !field.readOnly && onChanged != null
                       ? IconButton(
                           icon: const Icon(Icons.delete, color: Colors.red),
@@ -168,6 +190,52 @@ class ChildTableField extends StatelessWidget {
       ],
     );
   }
+
+  /// Resolves everything one row needs to render in a single metadata read.
+  Future<_RowDisplay> _rowDisplay(Map<String, dynamic> row, int index) async {
+    DocTypeMeta? meta;
+    try {
+      meta = await getMeta?.call(field.options!);
+    } catch (_) {
+      meta = null;
+    }
+    final columns = childListViewFields(meta);
+    if (columns.isNotEmpty) {
+      return _RowDisplay(
+        title: '',
+        subtitle: '',
+        cells: await resolveChildListViewCells(
+            row, meta, columns, resolveLinkTitle),
+      );
+    }
+    return _RowDisplay(
+      title: await resolveChildRowTitle(row, meta, index, resolveLinkTitle),
+      subtitle: _rowSubtitle(row),
+      cells: const <MapEntry<String, String>>[],
+    );
+  }
+
+  Widget _cellsColumn(List<MapEntry<String, String>> cells) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final c in cells)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('${c.key}: ',
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Expanded(
+                    child: Text(c.value,
+                        maxLines: 2, overflow: TextOverflow.ellipsis),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      );
 
   Future<String> _rowTitle(Map<String, dynamic> row) async {
     final meta = await getMeta?.call(field.options!);
@@ -537,4 +605,18 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
       ),
     );
   }
+}
+
+/// What one child row renders: either a set of declared grid cells, or a
+/// title/subtitle pair when the child doctype declares no columns.
+class _RowDisplay {
+  const _RowDisplay({
+    required this.title,
+    required this.subtitle,
+    required this.cells,
+  });
+
+  final String title;
+  final String subtitle;
+  final List<MapEntry<String, String>> cells;
 }

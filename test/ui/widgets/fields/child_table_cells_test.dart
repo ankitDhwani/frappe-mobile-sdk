@@ -85,4 +85,12 @@ void main() {
         'First: A');
     expect(await resolveChildRowTitle(const {}, meta, 2, null), 'Row #3');
   });
+
+  test('resolveChildRowTitle uses item_code when metadata is unavailable',
+      () async {
+    expect(
+      await resolveChildRowTitle(const {'item_code': 'SKU-1'}, null, 0, null),
+      'SKU-1',
+    );
+  });
 }
