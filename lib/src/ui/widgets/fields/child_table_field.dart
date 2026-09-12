@@ -455,7 +455,20 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
                 registerSubmit: widget.isReadOnly
                     ? null
                     : (fn) {
+                        final wasUnregistered = _submitFn == null;
                         _submitFn = fn;
+                        // Rebuild ONLY on the unregistered -> registered
+                        // transition, which is the single moment the action
+                        // button has to flip from disabled to enabled.
+                        //
+                        // Rebuilding on every registration is an unbounded
+                        // frame loop: the host calls registerSubmit from
+                        // inside its own build, so setState re-enters
+                        // formBuilder, which registers again, which schedules
+                        // another setState. The sheet never settles —
+                        // pumpAndSettle hangs in tests and the render loop
+                        // never idles on device.
+                        if (!wasUnregistered) return;
                         WidgetsBinding.instance.addPostFrameCallback((_) {
                           if (mounted) setState(() {});
                         });
