@@ -1,0 +1,160 @@
+import '../../../models/doc_field.dart';
+import '../../../models/doc_type_meta.dart';
+
+/// Resolves a Link value to the linked document's title. Hosts inject this so
+/// the widget layer never reaches for a service singleton.
+typedef LinkTitleResolver = Future<String?> Function(
+  String doctype,
+  String name,
+);
+
+const List<String> _systemRowKeys = <String>[
+  'name',
+  'server_name',
+  'owner',
+  'creation',
+  'modified',
+  'modified_by',
+  'docstatus',
+  'idx',
+  'doctype',
+  'parent',
+  'parentfield',
+  'parenttype',
+  'parent_doctype',
+  'mobile_uuid',
+  'parent_uuid',
+  'sync_status',
+  'sync_op',
+  'local_modified',
+  'push_base_payload',
+];
+
+/// True for bookkeeping columns a row must never title or tabulate from.
+bool isChildSystemKey(String key) =>
+    _systemRowKeys.contains(key) ||
+    key.endsWith('__is_local') ||
+    key.endsWith('__norm') ||
+    key.endsWith('__display');
+
+DocField? _childField(String fieldname, DocTypeMeta? meta) {
+  if (meta == null) return null;
+  for (final f in meta.fields) {
+    if (f.fieldname == fieldname) return f;
+  }
+  return null;
+}
+
+/// Columns the child doctype declares for its grid.
+///
+/// `isDataField` admits Table and Table MultiSelect, whose values are Lists —
+/// rendering one would print a raw collection into a cell, so both are
+/// excluded explicitly.
+List<DocField> childListViewFields(DocTypeMeta? meta) {
+  if (meta == null) return const <DocField>[];
+  return meta.fields
+      .where((f) =>
+          f.inListView &&
+          f.isDataField &&
+          f.fieldtype != 'Table' &&
+          f.fieldtype != 'Table MultiSelect' &&
+          !f.hidden &&
+          (f.fieldname ?? '').isNotEmpty &&
+          !isChildSystemKey(f.fieldname!))
+      .toList(growable: false);
+}
+
+/// The field's label, falling back to its fieldname.
+String childLabelFor(String fieldname, DocTypeMeta? meta) {
+  final label = _childField(fieldname, meta)?.label;
+  if (label != null && label.trim().isNotEmpty) return label.trim();
+  return fieldname;
+}
+
+/// Display text for one cell. A Link cell stores the linked document's id, so
+/// resolve it to that document's title; other types render their raw value.
+/// Returns null for an empty or absent value so callers can skip it.
+Future<String?> childCellText(
+  String fieldname,
+  dynamic value,
+  DocTypeMeta? meta,
+  LinkTitleResolver? resolveTitle,
+) async {
+  if (value == null || value.toString().isEmpty) return null;
+  final f = _childField(fieldname, meta);
+  if (f != null &&
+      f.fieldtype == 'Link' &&
+      f.options != null &&
+      f.options!.isNotEmpty &&
+      resolveTitle != null) {
+    try {
+      final title = await resolveTitle(f.options!, value.toString());
+      if (title != null && title.trim().isNotEmpty) return title.trim();
+    } catch (_) {
+      // Fall through to the raw id: a title lookup failure must never blank a
+      // cell that has a value.
+    }
+  }
+  return value.toString();
+}
+
+/// Label/value pairs for [fields] on [row], Links resolved to their titles.
+///
+/// Every declared column is emitted, blank ones included — a grid renders an
+/// empty cell rather than collapsing the column, and dropping it would hide
+/// from the operator that the field exists at all. A numeric `0` is a real
+/// value; only a null or absent cell falls back to the em dash.
+Future<List<MapEntry<String, String>>> resolveChildListViewCells(
+  Map<String, dynamic> row,
+  DocTypeMeta? meta,
+  List<DocField> fields,
+  LinkTitleResolver? resolveTitle,
+) async {
+  final out = <MapEntry<String, String>>[];
+  for (final f in fields) {
+    final fn = f.fieldname;
+    if (fn == null || fn.isEmpty) continue;
+    final text = await childCellText(fn, row[fn], meta, resolveTitle);
+    out.add(MapEntry(
+      childLabelFor(fn, meta),
+      (text == null || text.isEmpty) ? '—' : text,
+    ));
+  }
+  return out;
+}
+
+/// A human title for a child row.
+///
+/// Prefers the child doctype's declared `title_field`, then walks the
+/// doctype's own field order so a row titles from its first real data field
+/// rather than an arbitrary storage column, then any non-system row key, and
+/// finally its 1-based position.
+Future<String> resolveChildRowTitle(
+  Map<String, dynamic> row,
+  DocTypeMeta? meta,
+  int index,
+  LinkTitleResolver? resolveTitle,
+) async {
+  final titleField = meta?.titleField;
+  if (titleField != null && titleField.isNotEmpty) {
+    final t =
+        await childCellText(titleField, row[titleField], meta, resolveTitle);
+    if (t != null && t.isNotEmpty) return t;
+  }
+  if (meta != null) {
+    for (final f in meta.fields) {
+      final fn = f.fieldname;
+      if (fn == null || fn.isEmpty) continue;
+      if (!f.isDataField || f.hidden) continue;
+      if (isChildSystemKey(fn)) continue;
+      final t = await childCellText(fn, row[fn], meta, resolveTitle);
+      if (t != null && t.isNotEmpty) return '${childLabelFor(fn, meta)}: $t';
+    }
+  }
+  for (final key in row.keys) {
+    if (isChildSystemKey(key)) continue;
+    final t = await childCellText(key, row[key], meta, resolveTitle);
+    if (t != null && t.isNotEmpty) return '${childLabelFor(key, meta)}: $t';
+  }
+  return 'Row #${index + 1}';
+}
