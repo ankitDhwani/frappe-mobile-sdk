@@ -205,6 +205,19 @@ class ChildTableField extends StatelessWidget {
     );
   }
 
+  /// Stamps the child doctype onto an emitted row.
+  ///
+  /// A row leaving the sheet otherwise carries only its rendered docfields, so
+  /// a consumer that needs to know which child doctype it belongs to has to
+  /// infer it from the parent field's options. An explicit value already on the
+  /// row wins and is never overwritten.
+  Map<String, dynamic> _withDoctype(Map<String, dynamic> row) {
+    final doctype = field.options;
+    if (doctype == null || doctype.isEmpty) return row;
+    if ((row['doctype']?.toString() ?? '').isNotEmpty) return row;
+    return {...row, 'doctype': doctype};
+  }
+
   /// Guidance to show above a row form, or null when the host supplies none.
   String? _noticeFor(Map<String, dynamic>? row) => rowNoticeBuilder?.call(
         field.options ?? '',
@@ -399,7 +412,8 @@ class ChildTableField extends StatelessWidget {
           // parent save the user triggers in between.
           if (!ctx.mounted) return;
           Navigator.pop(ctx);
-          final newList = List<dynamic>.from(listValue)..add(row);
+          final newList = List<dynamic>.from(listValue)
+            ..add(_withDoctype(row));
           onChanged!(newList);
         },
         onRemove: null,
@@ -457,7 +471,8 @@ class ChildTableField extends StatelessWidget {
                 // Carry the row's local identity (mobile_uuid / name) across the
                 // edit — the child form does not render those columns and would
                 // otherwise drop them, orphaning any queued attachment row.
-                newList[index] = preserveChildIdentity(rowData, data);
+                newList[index] =
+                    _withDoctype(preserveChildIdentity(rowData, data));
                 onChanged?.call(newList);
               },
         onRemove: isReadOnly
