@@ -40,11 +40,12 @@ typedef ChildTableFormBuilder =
 ///
 /// [row] is null for the Add sheet and the existing row map for View/Edit, so a
 /// host can scope guidance to rows that have not reached the server yet.
-typedef ChildRowNoticeBuilder = String? Function(
-  String childDoctype,
-  String parentFieldname,
-  Map<String, dynamic>? row,
-);
+typedef ChildRowNoticeBuilder =
+    String? Function(
+      String childDoctype,
+      String parentFieldname,
+      Map<String, dynamic>? row,
+    );
 
 /// Widget for Table (child table) field type.
 /// Shows a list of rows; Add/Edit open a dialog with the form built by [formBuilder].
@@ -219,11 +220,8 @@ class ChildTableField extends StatelessWidget {
   }
 
   /// Guidance to show above a row form, or null when the host supplies none.
-  String? _noticeFor(Map<String, dynamic>? row) => rowNoticeBuilder?.call(
-        field.options ?? '',
-        field.fieldname ?? '',
-        row,
-      );
+  String? _noticeFor(Map<String, dynamic>? row) =>
+      rowNoticeBuilder?.call(field.options ?? '', field.fieldname ?? '', row);
 
   /// Resolves everything one row needs to render in a single metadata read.
   Future<_RowDisplay> _rowDisplay(Map<String, dynamic> row, int index) async {
@@ -239,7 +237,11 @@ class ChildTableField extends StatelessWidget {
         title: '',
         subtitle: '',
         cells: await resolveChildListViewCells(
-            row, meta, columns, resolveLinkTitle),
+          row,
+          meta,
+          columns,
+          resolveLinkTitle,
+        ),
       );
     }
     return _RowDisplay(
@@ -250,67 +252,31 @@ class ChildTableField extends StatelessWidget {
   }
 
   Widget _cellsColumn(List<MapEntry<String, String>> cells) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final c in cells)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 2),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('${c.key}: ',
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                  Expanded(
-                    child: Text(c.value,
-                        maxLines: 2, overflow: TextOverflow.ellipsis),
-                  ),
-                ],
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      for (final c in cells)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${c.key}: ',
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
-            ),
-        ],
-      );
-
-  Future<String> _rowTitle(Map<String, dynamic> row) async {
-    final meta = await getMeta?.call(field.options!);
-    // Configured title_field first.
-    if (meta != null &&
-        meta.titleField != null &&
-        meta.titleField!.isNotEmpty) {
-      final v = row[meta.titleField!];
-      if (v != null && v.toString().isNotEmpty) return v.toString();
-    }
-    // Common name fields ('name' is a raw server id — deliberately excluded).
-    const prefer = ['item_name', 'item_code', 'bank_name'];
-    for (final k in prefer) {
-      if (row[k] != null && row[k].toString().isNotEmpty) {
-        return row[k].toString();
-      }
-    }
-    // Walk the child doctype's own field order for the first real data field
-    // (web grid parity) so a row never titles from an SDK bookkeeping column
-    // like server_name / mobile_uuid.
-    if (meta != null) {
-      for (final f in meta.fields) {
-        final fn = f.fieldname;
-        if (fn == null || fn.isEmpty) continue;
-        if (!f.isDataField || f.hidden) continue;
-        if (_isSystemKey(fn)) continue;
-        final v = row[fn];
-        if (v != null && v.toString().isNotEmpty) {
-          return '${f.displayLabel}: $v';
-        }
-      }
-    }
-    for (final e in row.entries) {
-      if (!_isSystemKey(e.key) &&
-          e.value != null &&
-          e.value.toString().isNotEmpty) {
-        return '${e.key}: ${e.value}';
-      }
-    }
-    return 'Row ${row.hashCode % 1000}';
-  }
+              Expanded(
+                child: Text(
+                  c.value,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
 
   String _rowSubtitle(Map<String, dynamic> row) {
     final parts = <String>[];
@@ -320,33 +286,6 @@ class ChildTableField extends StatelessWidget {
     return parts.join(' | ');
   }
 
-  bool _isSystemKey(String key) {
-    const sys = {
-      'name',
-      'server_name',
-      'owner',
-      'creation',
-      'modified',
-      'modified_by',
-      'docstatus',
-      'idx',
-      'doctype',
-      'parent',
-      'parentfield',
-      'parenttype',
-      'parent_doctype',
-      'mobile_uuid',
-      'parent_uuid',
-      'sync_status',
-      'sync_op',
-      'local_modified',
-      'push_base_payload',
-    };
-    return sys.contains(key) ||
-        key.endsWith('__is_local') ||
-        key.endsWith('__norm') ||
-        key.endsWith('__display');
-  }
 
   Future<void> _showAddRowDialog(
     BuildContext context,
@@ -412,8 +351,7 @@ class ChildTableField extends StatelessWidget {
           // parent save the user triggers in between.
           if (!ctx.mounted) return;
           Navigator.pop(ctx);
-          final newList = List<dynamic>.from(listValue)
-            ..add(_withDoctype(row));
+          final newList = List<dynamic>.from(listValue)..add(_withDoctype(row));
           onChanged!(newList);
         },
         onRemove: null,
@@ -471,8 +409,9 @@ class ChildTableField extends StatelessWidget {
                 // Carry the row's local identity (mobile_uuid / name) across the
                 // edit — the child form does not render those columns and would
                 // otherwise drop them, orphaning any queued attachment row.
-                newList[index] =
-                    _withDoctype(preserveChildIdentity(rowData, data));
+                newList[index] = _withDoctype(
+                  preserveChildIdentity(rowData, data),
+                );
                 onChanged?.call(newList);
               },
         onRemove: isReadOnly

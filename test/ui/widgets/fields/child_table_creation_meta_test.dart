@@ -171,7 +171,10 @@ void main() {
     );
     await addRow(tester);
 
-    expect(emitted.first, {'item_name': 'item 1'});
+    // `doctype` is stamped on every emitted row so a consumer need not
+    // infer it from the parent field. What matters here is that NO
+    // creation metadata was added.
+    expect(emitted.first, {'item_name': 'item 1', 'doctype': 'Order Item'});
   });
 
   // The Add-Row tests above submit through a stub form, which cannot answer
@@ -291,6 +294,9 @@ void main() {
     await tester.pumpWidget(host(childMeta: _provisioned()));
     await addRow(tester);
 
-    expect(emitted.first, {'item_name': 'item 1'});
+    // `doctype` is stamped on every emitted row so a consumer need not
+    // infer it from the parent field. What matters here is that NO
+    // creation metadata was added.
+    expect(emitted.first, {'item_name': 'item 1', 'doctype': 'Order Item'});
   });
 }

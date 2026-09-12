@@ -17,8 +17,9 @@ class _RegisteringForm extends StatelessWidget {
 }
 
 void main() {
-  testWidgets('the row sheet settles when the host registers submit on build',
-      (WidgetTester tester) async {
+  testWidgets('the row sheet settles when the host registers submit on build', (
+    WidgetTester tester,
+  ) async {
     final childMeta = DocTypeMeta.fromJson({
       'name': 'TestChildDoc',
       'fields': [
@@ -32,20 +33,23 @@ void main() {
       'options': 'TestChildDoc',
     });
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: ChildTableField(
-          field: field,
-          value: const [
-            {'child_data': 'Row 1'},
-          ],
-          onChanged: (_) {},
-          getMeta: (_) async => childMeta,
-          formBuilder: (meta, data, onSubmit, {registerSubmit, readOnly = false}) =>
-              _RegisteringForm(registerSubmit: registerSubmit),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChildTableField(
+            field: field,
+            value: const [
+              {'child_data': 'Row 1'},
+            ],
+            onChanged: (_) {},
+            getMeta: (_) async => childMeta,
+            formBuilder:
+                (meta, data, onSubmit, {registerSubmit, readOnly = false}) =>
+                    _RegisteringForm(registerSubmit: registerSubmit),
+          ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byType(ListTile).first);
