@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
-import 'package:frappe_mobile_sdk/src/ui/widgets/fields/child_table_field.dart';
 
 /// A host form builder that registers its submit callback from inside its own
 /// build, which is the normal contract — the callback is a closure over the
