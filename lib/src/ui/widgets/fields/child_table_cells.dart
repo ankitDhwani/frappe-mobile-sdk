@@ -125,20 +125,26 @@ Future<List<MapEntry<String, String>>> resolveChildListViewCells(
 
 /// A human title for a child row.
 ///
-/// Prefers the child doctype's declared `title_field`, then walks the
-/// doctype's own field order so a row titles from its first real data field
-/// rather than an arbitrary storage column, then any non-system row key, and
-/// finally its 1-based position.
+/// Prefers the child doctype's declared `title_field`, then the conventional
+/// name columns, then walks the doctype's own field order so a row titles from
+/// its first real data field rather than an arbitrary storage column, then any
+/// non-system row key, and finally its 1-based position.
 Future<String> resolveChildRowTitle(
   Map<String, dynamic> row,
   DocTypeMeta? meta,
   int index,
   LinkTitleResolver? resolveTitle,
 ) async {
-  final titleField = meta?.titleField;
-  if (titleField != null && titleField.isNotEmpty) {
-    final t =
-        await childCellText(titleField, row[titleField], meta, resolveTitle);
+  // Declared title_field first, then the conventional name columns — these
+  // are the ones a row is recognised by when a doctype declares no title_field
+  // (and when metadata is unavailable entirely).
+  final preferred = <String>[
+    if ((meta?.titleField ?? '').isNotEmpty) meta!.titleField!,
+    'item_name',
+    'item_code',
+  ];
+  for (final k in preferred) {
+    final t = await childCellText(k, row[k], meta, resolveTitle);
     if (t != null && t.isNotEmpty) return t;
   }
   if (meta != null) {
