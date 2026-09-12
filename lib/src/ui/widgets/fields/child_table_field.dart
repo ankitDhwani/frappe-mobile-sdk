@@ -36,6 +36,16 @@ typedef ChildTableFormBuilder =
       bool readOnly,
     });
 
+/// Returns optional guidance to show above a child row form, or null for none.
+///
+/// [row] is null for the Add sheet and the existing row map for View/Edit, so a
+/// host can scope guidance to rows that have not reached the server yet.
+typedef ChildRowNoticeBuilder = String? Function(
+  String childDoctype,
+  String parentFieldname,
+  Map<String, dynamic>? row,
+);
+
 /// Widget for Table (child table) field type.
 /// Shows a list of rows; Add/Edit open a dialog with the form built by [formBuilder].
 class ChildTableField extends StatelessWidget {
@@ -49,6 +59,9 @@ class ChildTableField extends StatelessWidget {
 
   /// Resolves a Link cell to the linked document's title. Null renders raw ids.
   final LinkTitleResolver? resolveLinkTitle;
+
+  /// Supplies optional guidance rendered above a child row form.
+  final ChildRowNoticeBuilder? rowNoticeBuilder;
 
   /// Captures a NEW row's `mobile_created_at` / `mobile_latitude_longitude`
   /// when Add Row is tapped. Null disables row-level capture entirely.
@@ -64,6 +77,7 @@ class ChildTableField extends StatelessWidget {
     this.formBuilder,
     this.errorText,
     this.resolveLinkTitle,
+    this.rowNoticeBuilder,
     this.creationCapture,
   });
 
@@ -190,6 +204,13 @@ class ChildTableField extends StatelessWidget {
       ],
     );
   }
+
+  /// Guidance to show above a row form, or null when the host supplies none.
+  String? _noticeFor(Map<String, dynamic>? row) => rowNoticeBuilder?.call(
+        field.options ?? '',
+        field.fieldname ?? '',
+        row,
+      );
 
   /// Resolves everything one row needs to render in a single metadata read.
   Future<_RowDisplay> _rowDisplay(Map<String, dynamic> row, int index) async {
@@ -358,6 +379,7 @@ class ChildTableField extends StatelessWidget {
       isScrollControlled: true,
       useSafeArea: true,
       builder: (ctx) => _ChildTableSheet(
+        notice: _noticeFor(null),
         title: 'Add ${field.options}',
         childMeta: childMeta!,
         initialData: null,
@@ -420,6 +442,7 @@ class ChildTableField extends StatelessWidget {
       isScrollControlled: true,
       useSafeArea: true,
       builder: (ctx) => _ChildTableSheet(
+        notice: _noticeFor(rowData),
         title: isReadOnly ? 'View ${field.options}' : 'Edit ${field.options}',
         childMeta: childMeta!,
         initialData: rowData,
@@ -457,6 +480,7 @@ class _ChildTableSheet extends StatefulWidget {
     required this.childMeta,
     required this.initialData,
     required this.isEdit,
+    this.notice,
     this.isReadOnly = false,
     required this.formBuilder,
     required this.onSubmit,
@@ -464,6 +488,7 @@ class _ChildTableSheet extends StatefulWidget {
   });
 
   final String title;
+  final String? notice;
   final DocTypeMeta childMeta;
   final Map<String, dynamic>? initialData;
   final bool isEdit;
@@ -515,6 +540,24 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
               ),
             ),
             const Divider(height: 1),
+            if ((widget.notice ?? '').trim().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.secondaryContainer,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    widget.notice!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSecondaryContainer,
+                    ),
+                  ),
+                ),
+              ),
             Expanded(
               child: widget.formBuilder(
                 widget.childMeta,
