@@ -251,6 +251,11 @@ class ChildTableField extends StatelessWidget {
     );
   }
 
+  /// One label/value line per declared column.
+  ///
+  /// Both sides are bounded: a long label would otherwise wrap to three lines,
+  /// and a Small Text value is unbounded — a ten-column child then eats a third
+  /// of the screen per row.
   Widget _cellsColumn(List<MapEntry<String, String>> cells) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     mainAxisSize: MainAxisSize.min,
@@ -261,15 +266,28 @@ class ChildTableField extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                '${c.key}: ',
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
               Expanded(
+                flex: 4,
                 child: Text(
-                  c.value,
+                  c.key,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF6B7280),
+                  ),
+                ),
+              ),
+              Expanded(
+                flex: 6,
+                child: Text(
+                  c.value,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
             ],
