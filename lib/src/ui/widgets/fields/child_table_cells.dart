@@ -3,10 +3,8 @@ import '../../../models/doc_type_meta.dart';
 
 /// Resolves a Link value to the linked document's title. Hosts inject this so
 /// the widget layer never reaches for a service singleton.
-typedef LinkTitleResolver = Future<String?> Function(
-  String doctype,
-  String name,
-);
+typedef LinkTitleResolver =
+    Future<String?> Function(String doctype, String name);
 
 const List<String> _systemRowKeys = <String>[
   'name',
@@ -53,14 +51,16 @@ DocField? _childField(String fieldname, DocTypeMeta? meta) {
 List<DocField> childListViewFields(DocTypeMeta? meta) {
   if (meta == null) return const <DocField>[];
   return meta.fields
-      .where((f) =>
-          f.inListView &&
-          f.isDataField &&
-          f.fieldtype != 'Table' &&
-          f.fieldtype != 'Table MultiSelect' &&
-          !f.hidden &&
-          (f.fieldname ?? '').isNotEmpty &&
-          !isChildSystemKey(f.fieldname!))
+      .where(
+        (f) =>
+            f.inListView &&
+            f.isDataField &&
+            f.fieldtype != 'Table' &&
+            f.fieldtype != 'Table MultiSelect' &&
+            !f.hidden &&
+            (f.fieldname ?? '').isNotEmpty &&
+            !isChildSystemKey(f.fieldname!),
+      )
       .toList(growable: false);
 }
 
@@ -115,10 +115,12 @@ Future<List<MapEntry<String, String>>> resolveChildListViewCells(
     final fn = f.fieldname;
     if (fn == null || fn.isEmpty) continue;
     final text = await childCellText(fn, row[fn], meta, resolveTitle);
-    out.add(MapEntry(
-      childLabelFor(fn, meta),
-      (text == null || text.isEmpty) ? '—' : text,
-    ));
+    out.add(
+      MapEntry(
+        childLabelFor(fn, meta),
+        (text == null || text.isEmpty) ? '—' : text,
+      ),
+    );
   }
   return out;
 }

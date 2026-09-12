@@ -3,17 +3,31 @@ import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 import 'package:frappe_mobile_sdk/src/ui/widgets/fields/child_table_cells.dart';
 
 DocTypeMeta _meta() => DocTypeMeta.fromJson({
-      'name': 'TestChildDoc',
-      'fields': [
-        {'fieldname': 'size', 'fieldtype': 'Data', 'label': 'Size',
-         'in_list_view': 1},
-        {'fieldname': 'source', 'fieldtype': 'Link', 'label': 'Source',
-         'options': 'TestSource', 'in_list_view': 1},
-        {'fieldname': 'notes', 'fieldtype': 'Data', 'label': 'Notes'},
-        {'fieldname': 'nested', 'fieldtype': 'Table', 'label': 'Nested',
-         'options': 'Other', 'in_list_view': 1},
-      ],
-    });
+  'name': 'TestChildDoc',
+  'fields': [
+    {
+      'fieldname': 'size',
+      'fieldtype': 'Data',
+      'label': 'Size',
+      'in_list_view': 1,
+    },
+    {
+      'fieldname': 'source',
+      'fieldtype': 'Link',
+      'label': 'Source',
+      'options': 'TestSource',
+      'in_list_view': 1,
+    },
+    {'fieldname': 'notes', 'fieldtype': 'Data', 'label': 'Notes'},
+    {
+      'fieldname': 'nested',
+      'fieldtype': 'Table',
+      'label': 'Nested',
+      'options': 'Other',
+      'in_list_view': 1,
+    },
+  ],
+});
 
 void main() {
   test('childListViewFields keeps declared columns and drops Table types', () {
@@ -35,8 +49,10 @@ void main() {
       childListViewFields(_meta()),
       (doctype, name) async => doctype == 'TestSource' ? 'Bank Loan' : null,
     );
-    expect(cells.map((e) => '${e.key}=${e.value}').toList(),
-        ['Size=500g', 'Source=Bank Loan']);
+    expect(cells.map((e) => '${e.key}=${e.value}').toList(), [
+      'Size=500g',
+      'Source=Bank Loan',
+    ]);
   });
 
   test('a declared but empty column renders an em dash', () async {
@@ -70,7 +86,11 @@ void main() {
       ],
     });
     final t = await resolveChildRowTitle(
-        const {'other': 'x', 'label_field': 'Chosen'}, meta, 0, null);
+      const {'other': 'x', 'label_field': 'Chosen'},
+      meta,
+      0,
+      null,
+    );
     expect(t, 'Chosen');
   });
 
@@ -81,16 +101,20 @@ void main() {
         {'fieldname': 'first', 'fieldtype': 'Data', 'label': 'First'},
       ],
     });
-    expect(await resolveChildRowTitle(const {'first': 'A'}, meta, 0, null),
-        'First: A');
+    expect(
+      await resolveChildRowTitle(const {'first': 'A'}, meta, 0, null),
+      'First: A',
+    );
     expect(await resolveChildRowTitle(const {}, meta, 2, null), 'Row #3');
   });
 
-  test('resolveChildRowTitle uses item_code when metadata is unavailable',
-      () async {
-    expect(
-      await resolveChildRowTitle(const {'item_code': 'SKU-1'}, null, 0, null),
-      'SKU-1',
-    );
-  });
+  test(
+    'resolveChildRowTitle uses item_code when metadata is unavailable',
+    () async {
+      expect(
+        await resolveChildRowTitle(const {'item_code': 'SKU-1'}, null, 0, null),
+        'SKU-1',
+      );
+    },
+  );
 }
