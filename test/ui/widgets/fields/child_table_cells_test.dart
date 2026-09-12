@@ -117,4 +117,62 @@ void main() {
       );
     },
   );
+
+  test('a real 0 is kept, not shown as blank', () async {
+    final meta = DocTypeMeta.fromJson({
+      'name': 'TestChildDoc',
+      'fields': [
+        {'fieldname': 'qty', 'fieldtype': 'Int', 'label': 'Qty',
+         'in_list_view': 1},
+      ],
+    });
+    final cells = await resolveChildListViewCells(
+        const {'qty': 0}, meta, childListViewFields(meta), null);
+    expect(cells.single.value, '0');
+  });
+
+  group('fieldtype rendering', () {
+    DocTypeMeta metaOf(String fieldtype) => DocTypeMeta.fromJson({
+          'name': 'TestChildDoc',
+          'fields': [
+            {'fieldname': 'v', 'fieldtype': fieldtype, 'label': 'V',
+             'in_list_view': 1},
+          ],
+        });
+
+    Future<String> cell(String fieldtype, dynamic value) async {
+      final m = metaOf(fieldtype);
+      final out = await resolveChildListViewCells(
+          {'v': value}, m, childListViewFields(m), null);
+      return out.single.value;
+    }
+
+    test('Check renders Yes/No', () async {
+      expect(await cell('Check', 1), 'Yes');
+      expect(await cell('Check', 0), 'No');
+    });
+
+    test('Date renders dd/mm/yyyy', () async {
+      expect(await cell('Date', '2026-09-12'), '12/09/2026');
+    });
+
+    test('Attach renders the filename only', () async {
+      expect(await cell('Attach', '/files/scan_2026.pdf'), 'scan_2026.pdf');
+    });
+
+    test('Attach strips a query string', () async {
+      expect(await cell('Attach', '/files/a%20b.jpg?v=3'), 'a%20b.jpg');
+    });
+
+    test('Attach never leaks an absolute local path', () async {
+      final v = await cell('Attach', '/data/user/0/app.id/cache/IMG_9.jpg');
+      expect(v, 'IMG_9.jpg');
+      expect(v.contains('/'), isFalse);
+    });
+
+    test('a pending marker reads as human text', () async {
+      expect(await cell('Attach', 'pending:8f21ac'),
+          'Attached (not yet synced)');
+    });
+  });
 }

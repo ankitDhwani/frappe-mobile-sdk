@@ -95,6 +95,33 @@ Future<String?> childCellText(
       // cell that has a value.
     }
   }
+  if (f != null && f.fieldtype == 'Check') {
+    final v = value.toString().trim();
+    return (v == '1' || v.toLowerCase() == 'true') ? 'Yes' : 'No';
+  }
+  if (f != null && (f.fieldtype == 'Date' || f.fieldtype == 'Datetime')) {
+    // Raw ISO is not a value to put in front of an operator.
+    final parsed = DateTime.tryParse(value.toString().trim());
+    if (parsed != null) {
+      final d = parsed.toLocal();
+      final dd = d.day.toString().padLeft(2, '0');
+      final mm = d.month.toString().padLeft(2, '0');
+      return f.fieldtype == 'Date'
+          ? '$dd/$mm/${d.year}'
+          : '$dd/$mm/${d.year} '
+              '${d.hour.toString().padLeft(2, '0')}:'
+              '${d.minute.toString().padLeft(2, '0')}';
+    }
+  }
+  if (f != null && (f.fieldtype == 'Attach' || f.fieldtype == 'Attach Image')) {
+    // An Attach cell holds one of three literals: a server URL, a durable
+    // absolute local path from an offline pick, or a `pending:<id>` marker.
+    // None of them is text to show an operator — surface a filename.
+    final raw = value.toString().trim();
+    if (raw.startsWith('pending:')) return 'Attached (not yet synced)';
+    final name = raw.split('?').first.split('/').last.trim();
+    return name.isEmpty ? 'Attached' : name;
+  }
   return value.toString();
 }
 
