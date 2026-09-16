@@ -303,7 +303,30 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   /// path's uuid adoption. The two meanings share a name and are not
   /// interchangeable: device identity answers "which install", document
   /// identity answers "which document".
-  late final String _newDocumentMobileUuid = const Uuid().v4();
+  String _newDocumentMobileUuid = const Uuid().v4();
+
+  /// Ends the current new-document identity and starts a fresh one.
+  ///
+  /// A SUCCESSFUL create ends the document; this screen does not end with it.
+  /// Neither save branch pops — both set the baseline, clear the dirty flag,
+  /// say "Saved successfully" and leave the form up, populated and editable,
+  /// with `widget.document` still null because nothing swaps it. So the next
+  /// Save from the same screen is a NEW record, and must not reuse the key of
+  /// the one already written.
+  ///
+  /// Reusing it was worse than a duplicate: the pre-flight lookup would find
+  /// the first document and return it, `applyServerDocument` would then write
+  /// the SECOND record's values into the FIRST record's local row, and the
+  /// screen would report success — leaving the local cache and the server
+  /// disagreeing until the next pull silently discarded the operator's work.
+  /// Offline had the same shape without the guard, because the uuid IS the
+  /// local row's primary key there.
+  ///
+  /// "Stable across retries" means stable across retries OF ONE DOCUMENT. That
+  /// is the whole contract, and a completed create is where one document stops.
+  void _startNewDocumentIdentity() {
+    _newDocumentMobileUuid = const Uuid().v4();
+  }
 
   /// The `mobile_uuid` this save must carry.
   ///
@@ -538,6 +561,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(covariant FormScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // A host reusing this screen for "save and add another" hands over a null
+    // document after a populated one. That is a NEW record, so it needs a new
+    // identity — otherwise the next create carries the previous document's key
+    // and resolves to it. Mirrors the realignment this screen already does on
+    // the same transition for creation metadata, for the same reason.
+    if (oldWidget.document != null && widget.document == null) {
+      _startNewDocumentIdentity();
+    }
     if (oldWidget.document?.serverId != widget.document?.serverId ||
         oldWidget.api != widget.api ||
         oldWidget.document?.data != widget.document?.data ||
@@ -1057,6 +1088,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           setState(() {
             _baselineFormData = savedData!;
           });
+          // The created document is finished; the screen is not. See
+          // [_startNewDocumentIdentity].
+          if (widget.document == null) _startNewDocumentIdentity();
           _isFormDirty.value = false;
           showStatusSnackBar(
             context,
@@ -1099,6 +1133,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         setState(() {
           _baselineFormData = savedData;
         });
+        // Same reason as the online branch — and load-bearing here too, since
+        // offline the uuid IS the local row's primary key, so reusing it writes
+        // the next record over the one just saved.
+        if (widget.document == null) _startNewDocumentIdentity();
         _isFormDirty.value = false;
         // A save may have queued freshly-picked attachments; refresh the
         // id→local-path map so any `pending:<id>` markers resolve in-place.

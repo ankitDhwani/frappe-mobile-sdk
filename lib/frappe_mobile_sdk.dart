@@ -59,6 +59,11 @@ export 'src/api/document_service.dart' show DocumentService;
 export 'src/api/create_idempotency.dart'
     show
         CreateIdempotencyGuard,
+        // The two typedefs are exported for the same reason `ResolveMediaFn`
+        // is: assignment infers the type, but a host that DECLARES or STORES
+        // one has to be able to name it.
+        OnResolvedExisting,
+        FindByMobileUuid,
         kMobileUuidField,
         readMobileUuid,
         withoutBlankMobileUuid,

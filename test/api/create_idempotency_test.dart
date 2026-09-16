@@ -245,6 +245,8 @@ void main() {
 
   group('M5 — a resolved create is reported, not silent', _m5Tests);
 
+  group('H2 — 409 means the document exists', _h2Tests);
+
   test(
     'reset forgets history, so a later save is not mistaken for a retry',
     () async {
@@ -352,4 +354,68 @@ void _m5Tests() {
       expect(second['name'], 'DOC-1');
     },
   );
+}
+
+/// H2 — a 409 is the server saying the document ALREADY EXISTS, not "nothing
+/// was written". Classifying it as a definitive refusal showed the operator a
+/// failure for a record that saved, which they answer by retrying — the exact
+/// failure this guard exists to end, arriving through the one response that
+/// states the answer outright.
+void _h2Tests() {
+  late _FakeServer server;
+  setUp(() => server = _FakeServer());
+
+  test('409 is ambiguous; other 4xx are not', () {
+    expect(
+      isAmbiguousCreateFailure(ApiException('Duplicate entry', 409)),
+      isTrue,
+    );
+    expect(isAmbiguousCreateFailure(ApiException('validation', 417)), isFalse);
+    expect(isAmbiguousCreateFailure(ApiException('forbidden', 403)), isFalse);
+    expect(isAmbiguousCreateFailure(ApiException('bad request', 400)), isFalse);
+  });
+
+  test('a 409 resolves to the document the earlier attempt created', () async {
+    // Reachable with no network misbehaviour: the pre-flight cannot run on the
+    // first attempt after an app restart, because the attempted set is
+    // in-memory. The unique index then answers 409.
+    final guard = CreateIdempotencyGuard(findByMobileUuid: server.find);
+    server.stored['u-409'] = {'name': 'DOC-EARLIER', 'mobile_uuid': 'u-409'};
+    server.failNextWith = ApiException('Duplicate entry', 409);
+
+    final doc = await guard.run(
+      doctype: 'PT',
+      data: {'mobile_uuid': 'u-409'},
+      create: server.create,
+    );
+
+    expect(doc['name'], 'DOC-EARLIER');
+    expect(server.lookups, ['u-409']);
+  });
+
+  test(
+    'a 409 whose document cannot be found still surfaces the error',
+    () async {
+      // Nothing to resolve to — losing the operator's work silently would be
+      // worse than showing them the failure.
+      final guard = CreateIdempotencyGuard(findByMobileUuid: server.find);
+      server.failNextWith = ApiException('Duplicate entry', 409);
+
+      await expectLater(
+        guard.run(
+          doctype: 'PT',
+          data: {'mobile_uuid': 'u-410'},
+          create: server.create,
+        ),
+        throwsA(isA<ApiException>()),
+      );
+    },
+  );
+
+  test('NetworkException is judged as a network error even with a status', () {
+    // L1 — `NetworkException extends FrappeException`, so the `is
+    // NetworkException` arm must stay FIRST. Swapped, this would be judged by
+    // the code and a 417-carrying network error would be called definitive.
+    expect(isAmbiguousCreateFailure(NetworkException('timeout', 417)), isTrue);
+  });
 }

@@ -27,14 +27,34 @@ const int kMaxRememberedAttempts = 512;
 ///   and the first one was already committed.
 /// * 5xx — the server was reached. A gateway timeout in particular is routinely
 ///   returned for a request that is still running and goes on to commit.
-/// * **4xx is NOT ambiguous.** 400 / 403 / 409 / 417 are the server positively
-///   refusing the write; nothing was created, and a retry should proceed
-///   normally rather than pay for a lookup that will find nothing.
+/// * **409 IS ambiguous — in fact it is positive proof the write landed.** Frappe
+///   raises `DuplicateEntryError` / `UniqueValidationError` with
+///   `http_status_code = 409`, which on a doctype where `mobile_uuid` carries
+///   its unique index is MariaDB rejecting the twin: an EARLIER attempt created
+///   the document. Reachable whenever the pre-flight did not run or lost — the
+///   first attempt after an app restart (the attempted set is in-memory), an
+///   eviction past [kMaxRememberedAttempts], or a race the single-flight cannot
+///   see. Classifying it as "nothing was created" showed the operator a failure
+///   for a record that saved, which they answer the only way they can: by
+///   retrying. That is the exact failure this guard exists to end, arriving
+///   through the one response that states the answer outright.
+/// * **Every other 4xx is NOT ambiguous.** 400 / 403 / 417 are the server
+///   positively refusing the write; nothing was created, and a corrected
+///   resubmit should proceed rather than pay for a lookup that finds nothing.
+///
+/// The `is NetworkException` arm must stay FIRST, and that is not cosmetic:
+/// `NetworkException extends FrappeException`, so once the status arm is
+/// reached a network error carrying a code would be judged by that code
+/// instead. Latent today only because the constructor is called with one
+/// argument everywhere.
 bool isAmbiguousCreateFailure(Object error) {
+  // Order matters — see the note above.
   if (error is NetworkException) return true;
   if (error is FrappeException) {
     final code = error.statusCode;
     if (code == null) return true;
+    // 409: the server is telling us the document already exists.
+    if (code == 409) return true;
     return code >= 500;
   }
   // An error type this layer does not model at all. It cannot be shown to be a
@@ -256,6 +276,14 @@ class CreateIdempotencyGuard {
 
   /// Forgets every remembered attempt. For tests and for logout, where a new
   /// user must not inherit the previous session's create history.
+  ///
+  /// Clears `_inFlight` too, which is deliberate rather than overlooked: a
+  /// create still running at logout loses its single-flight entry, so a
+  /// concurrent call for the same key would start a second POST. Vanishingly
+  /// unlikely — it needs two saves of one document across a logout — and at
+  /// logout dropping the entry is the better of the two wrongs, since holding
+  /// a future belonging to the previous session is worse than a redundant
+  /// request. Stated because it is a real edge, not because it is a problem.
   void reset() {
     _inFlight.clear();
     _attempted.clear();
