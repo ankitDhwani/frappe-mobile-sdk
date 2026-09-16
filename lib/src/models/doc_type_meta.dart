@@ -135,6 +135,13 @@ class DocTypeMeta {
     // (permissions, issingle, is_submittable, __workflow_docs, …) still flows
     // through untouched, and the guarded keys below intentionally fall back to
     // the raw value when the typed one is null.
+    //
+    // Note the reach of the reorder, which is wider than the `fields` bug that
+    // motivated it: spreading `metaData` FIRST also makes the typed `name`,
+    // `label` and `istable` win over the raw payload's copies, where before the
+    // raw copy won. That is intended — the typed value is the one the rest of
+    // the SDK reads — but it is a behaviour change for any consumer that was
+    // relying on a raw `name`/`label` surviving a `toJson()` round-trip.
     final passthrough = <String, dynamic>{};
     final raw = metaData;
     if (raw != null) {

@@ -154,6 +154,56 @@ void main() {
     expect(row.containsKey(mobileLatitudeLongitudeField), isFalse);
   });
 
+  testWidgets(
+    'a row survives the sheet being dismissed during the location wait',
+    (tester) async {
+      // REGRESSION. `onSubmit` awaits `pending.location()` — up to
+      // `saveWait` — and the sheet stays dismissible the whole time with no
+      // indication that anything is happening. The old order was
+      // `if (!ctx.mounted) return; Navigator.pop(ctx); onChanged(...)`, so a
+      // user who tapped Save, saw nothing, and swiped the sheet away hit the
+      // early return and LOST the row they had just filled in: no error, no
+      // row, nothing to retry. `onChanged` belongs to the parent widget, so it
+      // must fire whether or not this sheet is still up.
+      await tester.pumpWidget(
+        host(
+          childMeta: _provisioned(),
+          capture: MobileCreationCapture(
+            checkReadiness: () async => LocationReadiness.ready,
+            now: () => DateTime(2026, 8, 18, 9, 5, 3),
+            readLocation: () => Completer<String?>().future,
+            saveWait: const Duration(milliseconds: 1500),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Add Row'));
+      await settle(tester);
+      await tester.tap(find.text('SubmitRow'));
+      // Mid-wait: the GPS read has not landed and the sheet is still up.
+      await tester.pump(const Duration(milliseconds: 50));
+
+      // The user gives up on an apparently-dead Save and swipes it away.
+      // Pumped well past the dismiss animation so the sheet's context is
+      // genuinely unmounted BEFORE the `saveWait` elapses — without that the
+      // await resumes on a still-mounted context and the bug cannot reproduce.
+      tester.state<NavigatorState>(find.byType(Navigator).last).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      // Now let the location wait time out and onSubmit resume.
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        emitted,
+        isNotEmpty,
+        reason: 'the filled-in row must not be silently discarded',
+      );
+      expect((emitted.first as Map<String, dynamic>)['item_name'], 'item 1');
+    },
+  );
+
   testWidgets('a child doctype without the fields is left untouched', (
     tester,
   ) async {

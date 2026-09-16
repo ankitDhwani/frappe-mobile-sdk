@@ -163,17 +163,21 @@ class ChildTableField extends StatelessWidget {
                           },
                         )
                       : null,
-                  onTap: () {
-                    final isReadOnly =
-                        !enabled || field.readOnly || onChanged == null;
-                    _showRowDialog(
-                      context,
-                      index,
-                      listValue,
-                      row,
-                      isReadOnly: isReadOnly,
-                    );
-                  },
+                  // Null when [_showRowDialog] would bail out at its own
+                  // guard. Making `onTap` unconditional gave those rows an ink
+                  // splash and nothing else — a dead tile that looks live.
+                  // The condition mirrors that guard exactly; keep them in
+                  // step.
+                  onTap: _canOpenRowDialog(listValue)
+                      ? () => _showRowDialog(
+                          context,
+                          index,
+                          listValue,
+                          row,
+                          isReadOnly:
+                              !enabled || field.readOnly || onChanged == null,
+                        )
+                      : null,
                 ),
               );
             },
@@ -291,7 +295,6 @@ class ChildTableField extends StatelessWidget {
     return parts.join(' | ');
   }
 
-
   Future<void> _showAddRowDialog(
     BuildContext context,
     List<dynamic> listValue,
@@ -326,6 +329,15 @@ class ChildTableField extends StatelessWidget {
     // not when the row is submitted. The user then spends a few seconds filling
     // the row in, which is exactly the window the GPS read needs, so the wait
     // at submit below is almost always already satisfied.
+    //
+    // Known cost, accepted: a CANCELLED Add Row leaves this read running to its
+    // own 15 s `timeLimit` with nobody awaiting it — one stray GPS session per
+    // abandoned row. It is contained, not leaked: the read is wrapped in
+    // `guarded()`, so a failure is swallowed rather than thrown into a dead
+    // context, and the future is discarded when `pending` goes out of scope.
+    // Cancelling it properly means adding a `cancel()` to the pending-capture
+    // API, which is public surface for a bounded, silent cost — deliberately
+    // not done here.
     final capture = creationCapture;
     final pending = (capture != null && declaresCreationMeta(childMeta))
         ? capture.begin()
@@ -351,17 +363,35 @@ class ChildTableField extends StatelessWidget {
                   createdAt: formatFrappeDatetime(pending.startedAt),
                   latitudeLongitude: await pending.location(),
                 );
-          // Awaited before the pop so the row is complete when the sheet
-          // closes; a row handed to `onChanged` after the fact could miss a
-          // parent save the user triggers in between.
-          if (!ctx.mounted) return;
-          Navigator.pop(ctx);
+          // `onChanged` FIRST, and unconditionally. The await above can take
+          // up to `kCreationLocationSaveWait` waiting on a GPS fix, and the
+          // sheet stays dismissible throughout — so a user who taps Save, sees
+          // nothing happen and swipes the sheet away used to land here with
+          // `ctx.mounted == false`, hit the early `return`, and lose the row
+          // they had just filled in. Silently: no error, no row.
+          //
+          // `onChanged` belongs to the PARENT widget, not to this sheet's
+          // context, so it is safe to call whether or not the sheet is still
+          // up. Only `Navigator.pop` needs the guard.
           final newList = List<dynamic>.from(listValue)..add(_withDoctype(row));
           onChanged!(newList);
+          if (ctx.mounted) Navigator.pop(ctx);
         },
         onRemove: null,
       ),
     );
+  }
+
+  /// Whether [_showRowDialog] would actually open a sheet for this field.
+  ///
+  /// Mirrors that method's own early-return guard so a tile is only given an
+  /// `onTap` when tapping it can do something.
+  bool _canOpenRowDialog(List<dynamic> listValue) {
+    final isReadOnly = !enabled || field.readOnly || onChanged == null;
+    return getMeta != null &&
+        field.options != null &&
+        formBuilder != null &&
+        (onChanged != null || isReadOnly);
   }
 
   Future<void> _showRowDialog(
@@ -518,32 +548,43 @@ class _ChildTableSheetState extends State<_ChildTableSheet> {
                 ),
               ),
             Expanded(
-              child: widget.formBuilder(
-                widget.childMeta,
-                widget.initialData,
-                (data) => widget.onSubmit(data),
-                registerSubmit: widget.isReadOnly
-                    ? null
-                    : (fn) {
-                        final wasUnregistered = _submitFn == null;
-                        _submitFn = fn;
-                        // Rebuild ONLY on the unregistered -> registered
-                        // transition, which is the single moment the action
-                        // button has to flip from disabled to enabled.
-                        //
-                        // Rebuilding on every registration is an unbounded
-                        // frame loop: the host calls registerSubmit from
-                        // inside its own build, so setState re-enters
-                        // formBuilder, which registers again, which schedules
-                        // another setState. The sheet never settles —
-                        // pumpAndSettle hangs in tests and the render loop
-                        // never idles on device.
-                        if (!wasUnregistered) return;
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted) setState(() {});
-                        });
-                      },
-                readOnly: widget.isReadOnly,
+              // Belt and braces for read-only. `readOnly: true` is passed to
+              // the host's builder below, but the typedef cannot force a host
+              // to honour it — the minimal migration for the new parameter is
+              // to declare it and ignore it, which renders a fully editable
+              // form with a Close button. The user types, closes, and the
+              // edits vanish with nothing saying they were never kept.
+              // AbsorbPointer makes the subtree inert regardless, the same
+              // way `LocationRequiredBarrier` does in this release.
+              child: AbsorbPointer(
+                absorbing: widget.isReadOnly,
+                child: widget.formBuilder(
+                  widget.childMeta,
+                  widget.initialData,
+                  (data) => widget.onSubmit(data),
+                  registerSubmit: widget.isReadOnly
+                      ? null
+                      : (fn) {
+                          final wasUnregistered = _submitFn == null;
+                          _submitFn = fn;
+                          // Rebuild ONLY on the unregistered -> registered
+                          // transition, which is the single moment the action
+                          // button has to flip from disabled to enabled.
+                          //
+                          // Rebuilding on every registration is an unbounded
+                          // frame loop: the host calls registerSubmit from
+                          // inside its own build, so setState re-enters
+                          // formBuilder, which registers again, which schedules
+                          // another setState. The sheet never settles —
+                          // pumpAndSettle hangs in tests and the render loop
+                          // never idles on device.
+                          if (!wasUnregistered) return;
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (mounted) setState(() {});
+                          });
+                        },
+                  readOnly: widget.isReadOnly,
+                ),
               ),
             ),
             const Divider(height: 1),
