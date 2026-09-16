@@ -153,7 +153,12 @@ export 'src/ui/widgets/fields/child_table_field.dart'
         ChildTableField,
         ChildRowNoticeBuilder,
         preserveChildIdentity;
-export 'src/ui/widgets/fields/child_table_cells.dart';
+export 'src/ui/widgets/fields/child_table_cells.dart'
+    show
+        LinkTitleResolver,
+        childListViewFields,
+        resolveChildListViewCells,
+        resolveChildRowTitle;
 
 // Constants
 export 'src/constants/field_types.dart';

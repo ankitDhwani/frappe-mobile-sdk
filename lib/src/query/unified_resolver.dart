@@ -114,6 +114,20 @@ class UnifiedResolver {
       if (serverFilters == null || serverOrFilters == null) {
         return _emptyResult;
       }
+      // An AND list that sanitizes away to nothing is NOT "no constraint" —
+      // it is a constraint that cannot be expressed server-side. Sending the
+      // query without it would answer with page 1 of the whole doctype when
+      // the caller asked for one specific row.
+      //
+      // `null` above already covers a clause on a system PARENT column. This
+      // covers the other exit: `mobile_uuid` is `continue`d (dropped) rather
+      // than returning null, because on the OR side dropping it is correct —
+      // its sibling `server_name` clause still constrains the query. On the
+      // AND side there is no sibling to fall back on, so a lone
+      // `[['mobile_uuid','=',u]]` sanitized to `[]` and went out unfiltered.
+      if (filters.isNotEmpty && serverFilters.isEmpty) {
+        return _emptyResult;
+      }
       // An OR list that sanitizes away to nothing constrains nothing, so
       // sending it would match every row. It only empties when every clause
       // named `mobile_uuid`, i.e. the caller was looking for a row that has
@@ -315,6 +329,10 @@ class UnifiedResolver {
         final serverFilters = _toServerFilters(filters);
         final serverOrFilters = _toServerFilters(orFilters);
         if (serverFilters == null || serverOrFilters == null) return;
+        // Same asymmetry as the foreground path: an AND list that sanitizes
+        // to empty would refresh the whole doctype instead of the rows the
+        // caller asked for.
+        if (filters.isNotEmpty && serverFilters.isEmpty) return;
         if (orFilters.isNotEmpty && serverOrFilters.isEmpty) return;
         await backgroundFetch(doctype, {
           'filters': serverFilters,

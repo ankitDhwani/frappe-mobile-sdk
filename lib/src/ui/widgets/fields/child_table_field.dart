@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 import '../../../models/doc_field.dart';
 import '../../../models/doc_type_meta.dart';
@@ -142,25 +143,11 @@ class ChildTableField extends StatelessWidget {
               return Card(
                 margin: const EdgeInsets.only(bottom: 8),
                 child: ListTile(
-                  title: FutureBuilder<_RowDisplay>(
-                    future: _rowDisplay(row, index),
-                    builder: (context, snap) {
-                      final d = snap.data;
-                      if (d == null) return const Text('…');
-                      if (d.cells.isNotEmpty) return _cellsColumn(d.cells);
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(d.title),
-                          if (d.subtitle.isNotEmpty)
-                            Text(
-                              d.subtitle,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                        ],
-                      );
-                    },
+                  title: _RowTitle(
+                    row: row,
+                    index: index,
+                    resolve: _rowDisplay,
+                    cellsColumn: _cellsColumn,
                   ),
                   // The declared columns already carry the values a subtitle
                   // would repeat, so it is folded into the title builder above
@@ -634,4 +621,78 @@ class _RowDisplay {
   final String title;
   final String subtitle;
   final List<MapEntry<String, String>> cells;
+}
+
+/// Resolves and renders ONE child row's display, memoising the result.
+///
+/// The resolution used to be started inside `ListView.builder`'s `itemBuilder`
+/// as `future: _rowDisplay(row, index)`. That creates a NEW future on every
+/// rebuild of the parent form — so a keystroke in an unrelated field cost, per
+/// row, one `getMeta()` plus one title lookup per Link column (a 30-row grid
+/// with 4 Link columns = 120 lookups per keystroke). It was visible as well as
+/// slow: each new future starts with `snapshot.data == null`, so the whole grid
+/// blanked to "…" and repainted every time.
+///
+/// Holding the future in State fixes both. [didUpdateWidget] re-resolves only
+/// when this row's own content actually changed, so an edit still refreshes
+/// while an unrelated rebuild reuses the completed result. Per-row state rather
+/// than one cache on the grid: `ListView.builder` already gives each row its
+/// own Element, so invalidation follows the row instead of needing a keyed map
+/// that something has to remember to evict.
+class _RowTitle extends StatefulWidget {
+  const _RowTitle({
+    required this.row,
+    required this.index,
+    required this.resolve,
+    required this.cellsColumn,
+  });
+
+  final Map<String, dynamic> row;
+  final int index;
+  final Future<_RowDisplay> Function(Map<String, dynamic>, int) resolve;
+  final Widget Function(List<MapEntry<String, String>>) cellsColumn;
+
+  @override
+  State<_RowTitle> createState() => _RowTitleState();
+}
+
+class _RowTitleState extends State<_RowTitle> {
+  late Future<_RowDisplay> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = widget.resolve(widget.row, widget.index);
+  }
+
+  @override
+  void didUpdateWidget(covariant _RowTitle old) {
+    super.didUpdateWidget(old);
+    // `mapEquals` and not identity: a rebuild commonly hands over a fresh map
+    // with identical contents, and re-resolving that is the whole problem.
+    if (old.index != widget.index || !mapEquals(old.row, widget.row)) {
+      _future = widget.resolve(widget.row, widget.index);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_RowDisplay>(
+      future: _future,
+      builder: (context, snap) {
+        final d = snap.data;
+        if (d == null) return const Text('…');
+        if (d.cells.isNotEmpty) return widget.cellsColumn(d.cells);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(d.title),
+            if (d.subtitle.isNotEmpty)
+              Text(d.subtitle, style: Theme.of(context).textTheme.bodySmall),
+          ],
+        );
+      },
+    );
+  }
 }

@@ -143,6 +143,44 @@ void main() {
       expect(res.rows, isEmpty);
     });
 
+    test('sends NOTHING when an AND list sanitizes away entirely', () async {
+      // The AND twin of the OR case above, and the more dangerous one. A lone
+      // `mobile_uuid` clause is DROPPED by the sanitizer (not rejected with
+      // null, because dropping it is correct on the OR side where a sibling
+      // `server_name` clause still constrains). With no sibling, the filter
+      // list sanitizes to `[]` — and an empty AND list is no constraint at
+      // all, so the request would have come back with page 1 of the entire
+      // doctype when the caller asked for one specific unpushed local row.
+      final res = await buildResolver().resolve(
+        doctype: 'Customer',
+        filters: [
+          ['mobile_uuid', '=', 'u-local-only'],
+        ],
+      );
+
+      expect(server.seen, isEmpty, reason: 'must not query unfiltered');
+      expect(res.rows, isEmpty);
+    });
+
+    test(
+      'an AND list keeps going when only SOME clauses sanitize away',
+      () async {
+        // Dropping `mobile_uuid` here is safe: `customer_name` survives, so
+        // the query is still narrower than the whole doctype.
+        await buildResolver().resolve(
+          doctype: 'Customer',
+          filters: [
+            ['mobile_uuid', '=', 'u-local-only'],
+            ['customer_name', '=', 'Acme'],
+          ],
+        );
+
+        final sent = Uri.decodeFull(server.seen.single.toString());
+        expect(sent, contains('customer_name'));
+        expect(sent, isNot(contains('mobile_uuid')));
+      },
+    );
+
     test('leaves ordinary business columns untouched', () async {
       await buildResolver().resolve(
         doctype: 'Customer',

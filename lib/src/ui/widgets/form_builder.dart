@@ -18,6 +18,7 @@ import '../../utils/field_normalizer.dart';
 import '../../utils/sdk_log.dart';
 import '../../utils/translate.dart';
 import '../../services/mobile_creation_capture.dart';
+import 'fields/child_table_field.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
@@ -195,6 +196,15 @@ class FrappeFormBuilder extends StatefulWidget {
   final bool readOnly;
   final LinkOptionService? linkOptionService;
 
+  /// Per-row guidance shown in the child Add/View/Edit sheet — e.g. telling an
+  /// operator why a row cannot be edited until the parent has synced.
+  ///
+  /// Null (the default) shows no notice. Threaded to the grid through
+  /// [FieldFactory.rowNoticeBuilder]; before this existed a host had to
+  /// construct [ChildTableField] itself to use the hook, which is the fork the
+  /// hook was added to remove.
+  final ChildRowNoticeBuilder? childRowNoticeBuilder;
+
   /// When true (default), use LinkFieldCoordinator for sequenced link option loading.
   final bool useLinkFieldCoordinator;
 
@@ -335,6 +345,7 @@ class FrappeFormBuilder extends StatefulWidget {
     this.useLinkFieldCoordinator = true,
     this.customFieldFactory,
     this.creationCapture,
+    this.childRowNoticeBuilder,
     this.style,
     this.uploadFile,
     this.fileUrlBase,
@@ -513,6 +524,21 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
     if (widget.imagePickSource != null) {
       _fieldFactory.imagePickSource = widget.imagePickSource;
+    }
+    // Child-grid Link cells resolve to titles with NO host wiring: this widget
+    // already holds the service, so the widget layer never reaches for a
+    // singleton (see the [LinkTitleResolver] typedef doc) and a host does not
+    // have to construct [ChildTableField] itself just to get readable rows.
+    //
+    // Guarded like the six above, and for the same reason: a host that set its
+    // own resolver on a `customFieldFactory` must not have it clobbered when
+    // this builder happens to have been given a service too.
+    final linkService = widget.linkOptionService;
+    if (linkService != null && _fieldFactory.resolveLinkTitle == null) {
+      _fieldFactory.resolveLinkTitle = linkService.getLinkTitle;
+    }
+    if (widget.childRowNoticeBuilder != null) {
+      _fieldFactory.rowNoticeBuilder = widget.childRowNoticeBuilder;
     }
   }
 
