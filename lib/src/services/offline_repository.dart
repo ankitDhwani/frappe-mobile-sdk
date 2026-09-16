@@ -484,7 +484,31 @@ class OfflineRepository {
         );
         return (response['name'] as String?) ?? data['name'] as String;
       }
-      final response = await client!.document.createDocument(doctype, data);
+      // Carry a document identity online too, exactly as the offline branch
+      // below does — same policy, same precedence: honour a caller-supplied
+      // uuid, mint only when there is none.
+      //
+      // This branch used to send `data` untouched, which is the whole reason
+      // online creates duplicated while offline ones never did. It was never
+      // that the offline path is more careful: there the uuid is minted into
+      // the local row and IS its primary key, so every push retry sends the
+      // same value and the server's unique index rejects the twin. Online sent
+      // nothing, the column was NULL, and MariaDB permits unlimited NULLs in a
+      // unique index — so no two rows ever collided.
+      //
+      // Minting HERE only helps a caller that does not retry through a longer-
+      // lived owner: a uuid minted per ATTEMPT is a new identity each time and
+      // duplicates exactly as before. The stable value must come from whatever
+      // owns the document's lifetime — `FormScreen` holds one per screen. This
+      // is the floor, not the mechanism.
+      final onlineUuid = (data['mobile_uuid'] as String?)?.trim();
+      final onlineData = (onlineUuid != null && onlineUuid.isNotEmpty)
+          ? data
+          : <String, dynamic>{...data, 'mobile_uuid': _uuid.v4()};
+      final response = await client!.document.createDocument(
+        doctype,
+        onlineData,
+      );
       return (response['name'] as String?) ?? '';
     }
 

@@ -886,6 +886,13 @@ class AuthService {
       );
     }
     _client?.rest.setBearerToken(null);
+    // Forget every remembered create attempt. The idempotency guard's set is
+    // keyed on `(doctype, mobile_uuid)` with no notion of who was signed in, so
+    // without this a new user on the same device inherits the previous
+    // session's history. Harmless in practice — v4 uuids do not collide across
+    // users — but the alternative is a documented requirement that nothing
+    // satisfies, which is how it reads as done when it is not.
+    _client?.document.resetCreateIdempotency();
     _isAuthenticated = false;
     _cachedUserInfo = null;
     _roles = [];
