@@ -73,6 +73,21 @@ void main() {
 
   // Bounded pumps rather than pumpAndSettle: the modal sheet keeps scheduling
   // frames, so pumpAndSettle never returns here.
+  /// The sheet's Save action.
+  ///
+  /// Matched by SUBTYPE, not by exact runtime type. `FilledButton.icon(...)`
+  /// does not always construct a `FilledButton`: on Flutter 3.38 it returns a
+  /// private `_FilledButtonWithIcon` subclass, and `find.byType` compares
+  /// `runtimeType` exactly, so `widgetWithText(FilledButton, 'Save')` matched
+  /// nothing there while passing on newer Flutter where the factory returns a
+  /// plain `FilledButton`. The test was green locally and red on CI purely
+  /// because of that version difference — the widget was on screen the whole
+  /// time.
+  final saveButton = find.ancestor(
+    of: find.text('Save'),
+    matching: find.bySubtype<FilledButton>(),
+  );
+
   Future<void> settle(WidgetTester tester) async {
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(milliseconds: 100));
@@ -290,7 +305,7 @@ void main() {
 
     await tester.tap(find.byType(ListTile));
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.tap(saveButton);
     await settle(tester);
 
     expect(emitted, hasLength(1));
@@ -328,7 +343,7 @@ void main() {
 
     await tester.tap(find.byType(ListTile));
     await settle(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.tap(saveButton);
     await settle(tester);
 
     final row = emitted.first as Map<String, dynamic>;
