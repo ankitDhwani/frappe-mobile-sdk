@@ -274,7 +274,8 @@ void main() {
         _wrap(
           LinkField(
             field: _linkField(
-              linkFilters: '[["Task","diagnostic_framework","=",'
+              linkFilters:
+                  '[["Task","diagnostic_framework","=",'
                   '"eval:doc.diagnostic_framework"]]',
             ),
             linkOptionService: service,

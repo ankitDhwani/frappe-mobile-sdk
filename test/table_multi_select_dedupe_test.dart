@@ -61,14 +61,21 @@ void main() {
     test('the widget still implements this rule (source parity)', () {
       // The teeth this file would otherwise lack: if someone reverts
       // `_selected` back to the un-deduplicated map/where/toList, this fails.
-      final src = File('lib/src/ui/widgets/fields/table_multi_select_field.dart')
-          .readAsStringSync();
+      final src = File(
+        'lib/src/ui/widgets/fields/table_multi_select_field.dart',
+      ).readAsStringSync();
       final sel = src.substring(src.indexOf('List<String> get _selected'));
       final body = sel.substring(0, sel.indexOf('\n  }'));
-      expect(body.contains('seen.add'), isTrue,
-          reason: '_selected must de-duplicate; see QA #313');
-      expect(body.contains('.map(') && body.contains('.toList()'), isFalse,
-          reason: 'the old non-deduplicating map/toList form is back');
+      expect(
+        body.contains('seen.add'),
+        isTrue,
+        reason: '_selected must de-duplicate; see QA #313',
+      );
+      expect(
+        body.contains('.map(') && body.contains('.toList()'),
+        isFalse,
+        reason: 'the old non-deduplicating map/toList form is back',
+      );
     });
 
     test('an already-unique list is returned unchanged', () {

@@ -109,8 +109,8 @@ Future<String?> childCellText(
       return f.fieldtype == 'Date'
           ? '$dd/$mm/${d.year}'
           : '$dd/$mm/${d.year} '
-              '${d.hour.toString().padLeft(2, '0')}:'
-              '${d.minute.toString().padLeft(2, '0')}';
+                '${d.hour.toString().padLeft(2, '0')}:'
+                '${d.minute.toString().padLeft(2, '0')}';
     }
   }
   if (f != null && (f.fieldtype == 'Attach' || f.fieldtype == 'Attach Image')) {

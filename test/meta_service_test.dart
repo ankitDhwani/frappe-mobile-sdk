@@ -446,40 +446,42 @@ void main() {
 
     // The stamp DOES advance once the fetch has landed — otherwise the doctype
     // would re-queue on every launch forever.
-    test('setServerModifiedAt advances the stamp and stops the re-queue',
-        () async {
-      final db = await AppDatabase.inMemoryDatabase();
-      final metaService = MetaService(FrappeClient('https://fake.test'), db);
+    test(
+      'setServerModifiedAt advances the stamp and stops the re-queue',
+      () async {
+        final db = await AppDatabase.inMemoryDatabase();
+        final metaService = MetaService(FrappeClient('https://fake.test'), db);
 
-      await db.doctypeMetaDao.insertDoctypeMeta(
-        DoctypeMetaEntity(
-          doctype: 'Purchase Order',
-          modified: '2026-08-26 10:26:46',
-          serverModifiedAt: '2026-08-26 10:26:46',
-          isMobileForm: true,
-          metaJson: '{"fields":[{"fieldname":"a","fieldtype":"Data"}]}',
-          groupName: 'PC',
-          sortOrder: 0,
-        ),
-      );
+        await db.doctypeMetaDao.insertDoctypeMeta(
+          DoctypeMetaEntity(
+            doctype: 'Purchase Order',
+            modified: '2026-08-26 10:26:46',
+            serverModifiedAt: '2026-08-26 10:26:46',
+            isMobileForm: true,
+            metaJson: '{"fields":[{"fieldname":"a","fieldtype":"Data"}]}',
+            groupName: 'PC',
+            sortOrder: 0,
+          ),
+        );
 
-      // Simulate a SUCCESSFUL fetch completing.
-      await db.doctypeMetaDao.setServerModifiedAt(
-        'Purchase Order',
-        '2026-08-26 22:42:53',
-      );
+        // Simulate a SUCCESSFUL fetch completing.
+        await db.doctypeMetaDao.setServerModifiedAt(
+          'Purchase Order',
+          '2026-08-26 22:42:53',
+        );
 
-      final toSync = await metaService.updateMobileFormDoctypesForTest([
-        const MobileFormName(
-          mobileDoctype: 'Purchase Order',
-          groupName: 'PC',
-          doctypeMetaModifiedAt: '2026-08-26 22:42:53',
-          doctypeIcon: null,
-        ),
-      ]);
+        final toSync = await metaService.updateMobileFormDoctypesForTest([
+          const MobileFormName(
+            mobileDoctype: 'Purchase Order',
+            groupName: 'PC',
+            doctypeMetaModifiedAt: '2026-08-26 22:42:53',
+            doctypeIcon: null,
+          ),
+        ]);
 
-      expect(toSync, isNot(contains('Purchase Order')));
-    });
+        expect(toSync, isNot(contains('Purchase Order')));
+      },
+    );
 
     // Guards the OTHER direction: `modified` is the DocType document's own
     // timestamp and runs on a DIFFERENT clock from the mobile-config stamp

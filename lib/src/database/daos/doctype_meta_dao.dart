@@ -151,7 +151,10 @@ class DoctypeMetaDao {
   /// uses to decide whether to re-fetch; writing it before the fetch lands
   /// marks a doctype fresh while it still holds the old `metaJson`, and nothing
   /// ever re-queues it.
-  Future<void> setServerModifiedAt(String doctype, String serverModifiedAt) async {
+  Future<void> setServerModifiedAt(
+    String doctype,
+    String serverModifiedAt,
+  ) async {
     await _database.update(
       'doctype_meta',
       <String, Object?>{'serverModifiedAt': serverModifiedAt},

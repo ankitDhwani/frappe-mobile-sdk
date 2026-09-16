@@ -122,28 +122,44 @@ void main() {
     final meta = DocTypeMeta.fromJson({
       'name': 'TestChildDoc',
       'fields': [
-        {'fieldname': 'qty', 'fieldtype': 'Int', 'label': 'Qty',
-         'in_list_view': 1},
+        {
+          'fieldname': 'qty',
+          'fieldtype': 'Int',
+          'label': 'Qty',
+          'in_list_view': 1,
+        },
       ],
     });
     final cells = await resolveChildListViewCells(
-        const {'qty': 0}, meta, childListViewFields(meta), null);
+      const {'qty': 0},
+      meta,
+      childListViewFields(meta),
+      null,
+    );
     expect(cells.single.value, '0');
   });
 
   group('fieldtype rendering', () {
     DocTypeMeta metaOf(String fieldtype) => DocTypeMeta.fromJson({
-          'name': 'TestChildDoc',
-          'fields': [
-            {'fieldname': 'v', 'fieldtype': fieldtype, 'label': 'V',
-             'in_list_view': 1},
-          ],
-        });
+      'name': 'TestChildDoc',
+      'fields': [
+        {
+          'fieldname': 'v',
+          'fieldtype': fieldtype,
+          'label': 'V',
+          'in_list_view': 1,
+        },
+      ],
+    });
 
     Future<String> cell(String fieldtype, dynamic value) async {
       final m = metaOf(fieldtype);
       final out = await resolveChildListViewCells(
-          {'v': value}, m, childListViewFields(m), null);
+        {'v': value},
+        m,
+        childListViewFields(m),
+        null,
+      );
       return out.single.value;
     }
 
@@ -171,8 +187,10 @@ void main() {
     });
 
     test('a pending marker reads as human text', () async {
-      expect(await cell('Attach', 'pending:8f21ac'),
-          'Attached (not yet synced)');
+      expect(
+        await cell('Attach', 'pending:8f21ac'),
+        'Attached (not yet synced)',
+      );
     });
   });
 }
