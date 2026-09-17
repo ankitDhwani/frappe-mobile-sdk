@@ -336,6 +336,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   String get _documentMobileUuid =>
       widget.document?.localId ?? _newDocumentMobileUuid;
 
+  /// Test seam for the identity rule B1 turns on. Exposed because the rule is
+  /// only meaningful as the REAL screen applies it: a test that re-implements
+  /// the rule passes whether or not this screen still calls it, which is how
+  /// the first regression guard came to pin a replica of the fix instead of
+  /// the fix.
+  @visibleForTesting
+  String get documentMobileUuidForTesting => _documentMobileUuid;
+
   List<WorkflowTransition>? _workflowTransitions;
   bool _workflowLoading = false;
   Map<String, dynamic>? _workflowUpdatedDocData;

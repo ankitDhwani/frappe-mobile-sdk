@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../api/create_idempotency.dart' show OnResolvedExisting;
 import '../database/daos/media_cache_dao.dart';
 import '../database/daos/pending_attachment_dao.dart';
 import '../models/media_store_usage.dart';
@@ -220,11 +221,23 @@ class FrappeSDK {
     _modeNotifier?.value = next;
   }
 
+  /// Notified when an online create resolved to a document the server already
+  /// held for this `mobile_uuid`, instead of inserting a second one.
+  ///
+  /// Declared HERE, on the SDK, because this is the only layer a host reaches.
+  /// [AuthService] is constructed inside [_doInitialize] one statement before
+  /// its own `initialize()` reads this, and `sdk.auth` does not exist until
+  /// after that has already handed the value down to [FrappeClient] ->
+  /// `DocumentService`. A hook declared only on [AuthService] is therefore null
+  /// on every production path: there is no moment at which a host could set it.
+  final OnResolvedExisting? onResolvedExisting;
+
   FrappeSDK({
     required this.baseUrl,
     this.databaseAppName,
     this.payloadTransformer,
     this.onFfiInitFailure,
+    this.onResolvedExisting,
     this.pullPageSize = 500,
     this.syncServicePageSize = 1000,
     this.listChildDocsPageSize = 1000,
@@ -252,6 +265,7 @@ class FrappeSDK {
       isPersisted: true,
     ),
     http.Client? httpClient,
+    this.onResolvedExisting,
     this.pullPageSize = 500,
     this.syncServicePageSize = 1000,
     this.listChildDocsPageSize = 1000,
@@ -273,6 +287,7 @@ class FrappeSDK {
     _client = FrappeClient(
       baseUrl,
       httpClient: httpClient,
+      onResolvedExisting: onResolvedExisting,
       listChildDocsPageSize: listChildDocsPageSize,
       listFullDocsPageSize: listFullDocsPageSize,
       listDefaultPageSize: listDefaultPageSize,
@@ -405,6 +420,10 @@ class FrappeSDK {
       restartGapMs: tamperProtectionRestartGapMs,
     );
     _authService = AuthService();
+    // Assigned BEFORE initialize(), which is where AuthService reads it to
+    // build the FrappeClient. Assigning after would leave the hook null on the
+    // client that every DocumentService call actually uses.
+    _authService!.onResolvedExisting = onResolvedExisting;
     _authService!.initialize(baseUrl, database: _database);
 
     // Use the same authenticated client instance everywhere so that
