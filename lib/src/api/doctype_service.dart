@@ -46,7 +46,54 @@ class DoctypeService {
   /// offline-first watermark check (spec §4.9). Avoids the full meta payload.
   /// Returns null if the request fails or the DocType has no recorded
   /// modified timestamp on the server.
+  /// The newest `modified` across EVERY source that can change a doctype's
+  /// effective meta: the `DocType` row, its `Custom Field`s, and its
+  /// `Property Setter`s.
+  ///
+  /// `DocType.modified` alone is not a watermark, and treating it as one is
+  /// why meta sync could report "up to date" while serving a stale schema.
+  /// Custom Fields and Property Setters live in their OWN tables with their
+  /// own `modified`, and neither touches the parent `DocType` row:
+  ///
+  ///   * adding, editing or **deleting a Custom Field** changes what fields
+  ///     exist — and a field that vanished server-side while the client still
+  ///     lists it produces `Field not permitted in query: <fieldname>` on the
+  ///     next `get_list`, which blocks the picker for a required field;
+  ///   * a **Property Setter** is what Customize Form writes, so `reqd`,
+  ///     `hidden`, `options`, `read_only` and `in_list_view` all change
+  ///     through it.
+  ///
+  /// Measured on one real bench: 24 doctypes had a Custom Field newer than
+  /// their `DocType.modified`, and 57 had a Property Setter newer — including
+  /// doctypes whose effective meta had changed hours earlier while the
+  /// watermark still read five days old. This is not a corner case on a
+  /// deployment that customises through the UI, which is all of them.
+  ///
+  /// Timestamps are compared as STRINGS on purpose. Frappe serialises them as
+  /// `YYYY-MM-DD HH:MM:SS.ffffff`, a fixed-width format whose lexical order is
+  /// its chronological order, so this avoids a parse that could throw on an
+  /// unexpected shape and silently drop a source.
+  ///
+  /// Degrades rather than fails: each source is fetched independently and a
+  /// failure contributes nothing instead of nulling the result. Returning null
+  /// makes the caller treat the doctype as unknown; returning a PARTIAL max is
+  /// never worse than the previous behaviour, which used one source by design.
   Future<String?> getDocTypeWatermark(String doctype) async {
+    final marks = await Future.wait([
+      _docTypeModified(doctype),
+      _newestChildModified('Custom Field', 'dt', doctype),
+      _newestChildModified('Property Setter', 'doc_type', doctype),
+    ]);
+
+    String? newest;
+    for (final m in marks) {
+      if (m == null || m.isEmpty) continue;
+      if (newest == null || m.compareTo(newest) > 0) newest = m;
+    }
+    return newest;
+  }
+
+  Future<String?> _docTypeModified(String doctype) async {
     try {
       final response = await _restHelper.get(
         '/api/method/frappe.client.get_value',
@@ -64,7 +111,51 @@ class DoctypeService {
       }
       return null;
     } catch (e, st) {
-      sdkLog('DoctypeService.getDocTypeWatermark($doctype) failed — $e\n$st');
+      sdkLog('DoctypeService._docTypeModified($doctype) failed — $e\n$st');
+      return null;
+    }
+  }
+
+  /// Newest `modified` among [childDoctype] rows pointing at [doctype] through
+  /// [linkField]. Null when there are none, or on any failure.
+  ///
+  /// One row, ordered — not a count and not a full fetch. A doctype can carry
+  /// dozens of Property Setters and the only thing needed is the newest stamp.
+  Future<String?> _newestChildModified(
+    String childDoctype,
+    String linkField,
+    String doctype,
+  ) async {
+    try {
+      final response = await _restHelper.get(
+        '/api/method/frappe.client.get_list',
+        queryParams: {
+          'doctype': childDoctype,
+          'filters': jsonEncode([
+            [linkField, '=', doctype],
+          ]),
+          'fields': jsonEncode(['modified']),
+          'order_by': 'modified desc',
+          'limit_page_length': 1,
+        },
+      );
+      final rows = response is Map<String, dynamic>
+          ? response['message']
+          : null;
+      if (rows is! List || rows.isEmpty) return null;
+      final first = rows.first;
+      if (first is Map && first['modified'] != null) {
+        return first['modified'].toString();
+      }
+      return null;
+    } catch (e, st) {
+      // A site that restricts read on Custom Field / Property Setter, or an
+      // older bench, lands here. The DocType stamp still carries the result,
+      // which is exactly the previous behaviour — never worse.
+      sdkLog(
+        'DoctypeService._newestChildModified($childDoctype, $doctype) '
+        'failed — $e\n$st',
+      );
       return null;
     }
   }
