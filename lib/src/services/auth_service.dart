@@ -1,6 +1,7 @@
 import 'dart:developer' as dev;
 
 import '../api/client.dart';
+import '../api/create_idempotency.dart';
 import '../api/exceptions.dart';
 import '../api/oauth2_helper.dart';
 import '../database/app_database.dart';
@@ -193,7 +194,11 @@ class AuthService {
   ///
   /// Optionally provide [database] for stateless login token storage.
   void initialize(String baseUrl, {AppDatabase? database}) {
-    _client = FrappeClient(baseUrl, onTokenExpired: _tryRefreshMobileAuthToken);
+    _client = FrappeClient(
+      baseUrl,
+      onTokenExpired: _tryRefreshMobileAuthToken,
+      onResolvedExisting: onResolvedExisting,
+    );
     _database = database;
     _storage.write(key: _keyBaseUrl, value: baseUrl);
   }
@@ -205,6 +210,15 @@ class AuthService {
 
   /// Returns a stable UUID for this device/install. Creates and stores one if missing.
   /// Use when creating documents from mobile so server can store mobile_uuid.
+  /// Notified when an online create was answered by a document that ALREADY
+  /// existed rather than by writing a new one.
+  ///
+  /// Set BEFORE `initialize()` — it is handed to the `FrappeClient` built
+  /// there. Without it the idempotency guard resolves silently, which is safe
+  /// for plumbing and wrong for a person: a corrected resubmit can resolve to
+  /// the earlier payload and report success. See `OnResolvedExisting`.
+  OnResolvedExisting? onResolvedExisting;
+
   Future<String> getOrCreateMobileUuid() async {
     var value = await _storage.read(key: _keyMobileUuid);
     if (value == null || value.isEmpty) {
@@ -491,7 +505,26 @@ class AuthService {
           final updatedMeta = DoctypeMetaEntity(
             doctype: doctype,
             modified: existingMeta.modified,
-            serverModifiedAt: mfn.doctypeMetaModifiedAt,
+            // PRESERVE the recorded stamp — do NOT advance it to
+            // `mfn.doctypeMetaModifiedAt` here.
+            //
+            // `serverModifiedAt` is the staleness signal: `MetaService.
+            // _updateMobileFormDoctypes` decides whether to re-fetch a
+            // doctype's schema by asking whether the server's current stamp is
+            // NEWER than the one on this row. Writing the current stamp here,
+            // while deliberately keeping the OLD `metaJson` two lines below,
+            // made those two values equal before anything compared them — so
+            // `needsSync` was false forever and a doctype whose schema had
+            // changed was never re-fetched. On a real device this left
+            // forms rendering fields hours behind the desk,
+            // and a majority of cached doctypes stale, reported as the mobile
+            // forms "not being in parity with the desk".
+            //
+            // Advancing the stamp is `_updateMobileFormDoctypes`'s job,
+            // because that is the one place that also queues the re-fetch.
+            // Login's job is the mobile-form LIST (isMobileForm, groupName,
+            // sortOrder), which is what the rest of this entity carries.
+            serverModifiedAt: existingMeta.serverModifiedAt,
             isMobileForm: true,
             metaJson: existingMeta.metaJson,
             groupName: mfn.groupName,
@@ -886,6 +919,13 @@ class AuthService {
       );
     }
     _client?.rest.setBearerToken(null);
+    // Forget every remembered create attempt. The idempotency guard's set is
+    // keyed on `(doctype, mobile_uuid)` with no notion of who was signed in, so
+    // without this a new user on the same device inherits the previous
+    // session's history. Harmless in practice — v4 uuids do not collide across
+    // users — but the alternative is a documented requirement that nothing
+    // satisfies, which is how it reads as done when it is not.
+    _client?.document.resetCreateIdempotency();
     _isAuthenticated = false;
     _cachedUserInfo = null;
     _roles = [];
