@@ -8,10 +8,15 @@ import '../../../models/doc_type_meta.dart';
 import '../../../models/link_filter_result.dart';
 import '../../../services/link_option_service.dart';
 import '../../../services/link_field_coordinator.dart';
+import '../../../services/mobile_creation_capture.dart';
 import 'attach_field.dart';
+import '../../../models/image_pick_source.dart';
+import '../../../services/media_resolver.dart';
+import '../../../utils/media_store.dart';
 import 'base_field.dart';
 import 'button_field.dart';
 import 'check_field.dart';
+import 'child_table_cells.dart';
 import 'child_table_field.dart';
 import 'data_field.dart';
 import 'date_field.dart';
@@ -44,6 +49,38 @@ import 'time_field.dart';
 ///   }
 /// }
 /// ```
+///
+/// ## Host capabilities are instance state, not `createField` parameters
+///
+/// `createField` is the documented extension point, and Dart requires an
+/// override to redeclare EVERY named parameter of the method it overrides — so
+/// adding one breaks every existing subclass at compile time, and a default
+/// value does not save it (a caller holding a `FieldFactory` reference may
+/// still pass the argument explicitly). Host-supplied capabilities are
+/// therefore carried as mutable instance fields, which `FrappeFormBuilder`
+/// assigns for the form it renders:
+///
+/// - [capDataLength]
+/// - [errorTextResolver]
+/// - [reclaimAttachment]
+/// - [isOnline]
+/// - [pendingAttachmentPaths]
+/// - [mediaResolver]
+/// - [isOfflineMode]
+/// - [imagePickSource]
+///
+/// **Subclassing is the supported pattern; COMPOSITION is not.** A host that
+/// wraps an inner `FieldFactory` and delegates to it must forward every field
+/// in that list by hand, because the base reads its own fields unqualified and
+/// the inner instance never sees what the SDK set on the outer one. There is no
+/// compile-time signal when one is missed — the capability silently does not
+/// arrive, and for [reclaimAttachment] the default is destructive
+/// ([MediaStore.discardValue] deletes a staged file on sight, including one a
+/// queued `pending_attachments` row still owns). Extend this class instead.
+///
+/// Note also that one factory instance carries the state of ONE form: sharing a
+/// `customFieldFactory` between two simultaneously-mounted `FrappeFormBuilder`s
+/// makes them race on these fields, last `build` winning.
 class FieldFactory {
   LinkOptionService? linkOptionService;
   LinkFieldCoordinator? linkFieldCoordinator;
@@ -76,6 +113,92 @@ class FieldFactory {
   /// Instance state rather than a [createField] parameter for the
   /// subclass-compatibility reason documented on [capDataLength].
   String? Function(String fieldname)? errorTextResolver;
+
+  /// Captures `mobile_created_at` / `mobile_latitude_longitude` for a child
+  /// table row at the moment its **Add Row** is tapped — the row-level
+  /// counterpart of the capture [FormScreen] performs for a new parent record.
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength]: a new named
+  /// parameter would break every existing `FieldFactory` subclass at compile
+  /// time, and hosts do ship their own via `customFieldFactory`.
+  MobileCreationCapture? creationCapture;
+
+  /// Resolves a child-grid Link cell to the linked document's title, so a row
+  /// reads "Steel Rod 12mm" instead of `ITEM-0001`.
+  ///
+  /// Instance state for the same subclass-compatibility reason as
+  /// [creationCapture]: a new `createField` named parameter breaks every
+  /// existing `FieldFactory` subclass at compile time, and hosts do ship their
+  /// own via `customFieldFactory`.
+  ///
+  /// Left null the grid falls back to the raw docname. `FrappeFormBuilder`
+  /// assigns it from its own `linkOptionService` when it has one, so the
+  /// default path resolves titles with no host wiring at all — which is the
+  /// point: a host that had to construct [ChildTableField] itself to get this
+  /// was still maintaining the fork this hook exists to remove.
+  LinkTitleResolver? resolveLinkTitle;
+
+  /// Per-row guidance text for the child Add/View/Edit sheet. Null (the
+  /// default) shows no notice. Same instance-state rationale as above.
+  ChildRowNoticeBuilder? rowNoticeBuilder;
+
+  /// Reclaims the bytes behind an attach value a field discards or replaces.
+  ///
+  /// Defaults to [MediaStore.discardValue], which deletes any staged file on
+  /// sight — correct only where the value cannot be a form's. Hosts with a
+  /// database assign `OfflineRepository.reclaimDiscardedAttachment`, which
+  /// refuses a file a queued `pending_attachments` row still owns; see
+  /// [ReclaimAttachmentFn].
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength]: a new named
+  /// parameter breaks every existing override at compile time, and a default
+  /// value does not save it.
+  ReclaimAttachmentFn reclaimAttachment = MediaStore.discardValue;
+
+  /// Synchronous last-known connectivity, per the host. When it returns false
+  /// an attach/image pick is kept as a durable local path for save-time
+  /// queueing instead of being uploaded inline. Null → treated as online.
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  bool Function()? isOnline;
+
+  /// Map of `pending_attachments.id` → durable local file path, used to resolve
+  /// a `pending:<id>` field value (an offline-picked file not yet uploaded) for
+  /// the filename label, the View/Open action and the image preview.
+  /// Display-only — never alters the stored marker value.
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength]. Unlike the
+  /// others this one changes as picks complete rather than per meta, which is
+  /// why `FrappeFormBuilder` re-assigns it from `build` and not only from
+  /// `initState` / `didUpdateWidget`.
+  Map<int, String>? pendingAttachmentPaths;
+
+  /// Resolves a field value to a LOCAL file for viewing: a cache hit, or a
+  /// download stored in the cache on the way through so the next view works
+  /// offline. Display-only; see [ResolveMediaFn].
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  ResolveMediaFn? mediaResolver;
+
+  /// Returns true when the SDK is in offline-first mode, in which case a pick
+  /// is ALWAYS staged and queued rather than uploaded inline, whatever the
+  /// connectivity. Null is treated as "not offline mode".
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  bool Function()? isOfflineMode;
+
+  /// Which pick sources an image field offers. Null means
+  /// [ImagePickSource.both].
+  ///
+  /// Instance state rather than a [createField] parameter for the
+  /// subclass-compatibility reason documented on [capDataLength].
+  ImagePickSource Function()? imagePickSource;
 
   /// Inline error for [field], or null when none applies.
   String? _errorTextFor(DocField field) {
@@ -258,6 +381,9 @@ class FieldFactory {
           formBuilder: childTableFormBuilder,
           style: fieldStyle,
           errorText: _errorTextFor(field),
+          creationCapture: creationCapture,
+          resolveLinkTitle: resolveLinkTitle,
+          rowNoticeBuilder: rowNoticeBuilder,
         );
 
       case 'Duration':
@@ -306,6 +432,11 @@ class FieldFactory {
           uploadFile: uploadFile,
           fileUrlBase: fileUrlBase,
           imageHeaders: imageHeaders,
+          isOnline: isOnline,
+          pendingAttachmentPaths: pendingAttachmentPaths,
+          mediaResolver: mediaResolver,
+          reclaimAttachment: reclaimAttachment,
+          isOfflineMode: isOfflineMode,
         );
 
       case FieldTypes.attachImage:
@@ -319,6 +450,12 @@ class FieldFactory {
           uploadFile: uploadFile,
           fileUrlBase: fileUrlBase,
           imageHeaders: imageHeaders,
+          isOnline: isOnline,
+          pendingAttachmentPaths: pendingAttachmentPaths,
+          mediaResolver: mediaResolver,
+          reclaimAttachment: reclaimAttachment,
+          isOfflineMode: isOfflineMode,
+          imagePickSource: imagePickSource,
         );
 
       case FieldTypes.html:
@@ -367,6 +504,9 @@ class _TableFieldBase extends BaseField {
   final Future<DocTypeMeta> Function(String doctype) getMeta;
   final ChildTableFormBuilder formBuilder;
   final String? errorText;
+  final MobileCreationCapture? creationCapture;
+  final LinkTitleResolver? resolveLinkTitle;
+  final ChildRowNoticeBuilder? rowNoticeBuilder;
 
   const _TableFieldBase({
     required super.field,
@@ -377,6 +517,9 @@ class _TableFieldBase extends BaseField {
     required this.formBuilder,
     super.style,
     this.errorText,
+    this.creationCapture,
+    this.resolveLinkTitle,
+    this.rowNoticeBuilder,
   });
 
   @override
@@ -385,6 +528,9 @@ class _TableFieldBase extends BaseField {
     return ChildTableField(
       field: field,
       value: value,
+      creationCapture: creationCapture,
+      resolveLinkTitle: resolveLinkTitle,
+      rowNoticeBuilder: rowNoticeBuilder,
       onChanged: onChanged != null
           ? (List<dynamic> v) => onChanged!.call(v)
           : null,

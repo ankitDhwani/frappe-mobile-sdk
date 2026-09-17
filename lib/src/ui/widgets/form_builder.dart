@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import '../../models/doc_type_meta.dart';
+import '../../models/image_pick_source.dart';
+import '../../services/media_resolver.dart';
+import '../../utils/media_store.dart';
 import '../../models/doc_field.dart';
 import '../../models/link_filter_result.dart';
 import '../../constants/field_types.dart';
@@ -14,6 +17,8 @@ import '../../utils/depends_on_evaluator.dart';
 import '../../utils/field_normalizer.dart';
 import '../../utils/sdk_log.dart';
 import '../../utils/translate.dart';
+import '../../services/mobile_creation_capture.dart';
+import 'fields/child_table_field.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
@@ -191,11 +196,25 @@ class FrappeFormBuilder extends StatefulWidget {
   final bool readOnly;
   final LinkOptionService? linkOptionService;
 
+  /// Per-row guidance shown in the child Add/View/Edit sheet — e.g. telling an
+  /// operator why a row cannot be edited until the parent has synced.
+  ///
+  /// Null (the default) shows no notice. Threaded to the grid through
+  /// [FieldFactory.rowNoticeBuilder]; before this existed a host had to
+  /// construct [ChildTableField] itself to use the hook, which is the fork the
+  /// hook was added to remove.
+  final ChildRowNoticeBuilder? childRowNoticeBuilder;
+
   /// When true (default), use LinkFieldCoordinator for sequenced link option loading.
   final bool useLinkFieldCoordinator;
 
   /// Custom field factory (if null, uses default FieldFactory)
   final FieldFactory? customFieldFactory;
+
+  /// Row-level creation capture for child tables — see
+  /// [FieldFactory.creationCapture]. Supplied by [FormScreen]; null disables
+  /// row-level capture.
+  final MobileCreationCapture? creationCapture;
 
   /// Custom styling options
   final FrappeFormStyle? style;
@@ -208,6 +227,45 @@ class FrappeFormBuilder extends StatefulWidget {
 
   /// Auth headers for loading private file URLs (e.g. [FrappeClient.requestHeaders])
   final Map<String, String>? imageHeaders;
+
+  /// Synchronous last-known connectivity, forwarded to Attach/Image fields so
+  /// an offline pick is stored as a durable local path (queued at save) rather
+  /// than uploaded inline. Null → fields treat as online.
+  final bool Function()? isOnline;
+
+  /// Map of `pending_attachments.id` → durable local path, forwarded to
+  /// Attach/Image fields so a `pending:<id>` value (offline pick not yet
+  /// uploaded) previews from its local file. Display-only.
+  final Map<int, String>? pendingAttachmentPaths;
+
+  /// Resolves an attach-field value to a local file for display, enabling
+  /// offline previews. Forwarded to Attach / Attach Image / Image fields.
+  final ResolveMediaFn? mediaResolver;
+
+  /// Reclaims the bytes behind an attach value a field discards or replaces.
+  ///
+  /// Forwarded to every Attach / Attach Image field, INCLUDING those inside
+  /// child rows — a child row picks and discards on the same path, so a hook
+  /// that stopped at the parent would leave half the fix unwired.
+  ///
+  /// Null means "not supplied", NOT "use the destructive default": the effective
+  /// default lives on [FieldFactory.reclaimAttachment]
+  /// ([MediaStore.discardValue]), and a null here leaves whatever the factory
+  /// already carries untouched. That distinction is load-bearing for a host that
+  /// wires its own [customFieldFactory] — when this defaulted to
+  /// `MediaStore.discardValue` the configure pass overwrote the host's queue-aware
+  /// hook with the delete-on-sight default on every build, silently destroying
+  /// files a queued `pending_attachments` row still owned. See
+  /// [ReclaimAttachmentFn].
+  final ReclaimAttachmentFn? reclaimAttachment;
+
+  /// Returns true when the SDK is in offline-first mode; forwarded to
+  /// Attach / Attach Image / Image so a pick is queued rather than uploaded
+  /// inline. See [AttachField.isOfflineMode].
+  final bool Function()? isOfflineMode;
+
+  /// Which pick sources image fields offer. Null means both.
+  final ImagePickSource Function()? imagePickSource;
 
   /// Fetches a linked document by doctype and name (for fetch_from).
   /// Try local repository first, then server. Return null if not found.
@@ -286,6 +344,8 @@ class FrappeFormBuilder extends StatefulWidget {
     this.linkOptionService,
     this.useLinkFieldCoordinator = true,
     this.customFieldFactory,
+    this.creationCapture,
+    this.childRowNoticeBuilder,
     this.style,
     this.uploadFile,
     this.fileUrlBase,
@@ -301,6 +361,12 @@ class FrappeFormBuilder extends StatefulWidget {
     this.parentFormData,
     this.getLinkFilterBuilder,
     this.cascadeProgrammaticChanges = false,
+    this.isOnline,
+    this.pendingAttachmentPaths,
+    this.mediaResolver,
+    this.reclaimAttachment,
+    this.isOfflineMode,
+    this.imagePickSource,
   });
 
   @override
@@ -323,7 +389,12 @@ class _FormSection {
 }
 
 class _FormColumn {
+  /// The `Column Break` that opened this column, or null for a column the
+  /// layout synthesised because content appeared with no break before it.
+  final DocField? columnField;
   final List<DocField> fields = [];
+
+  _FormColumn([this.columnField]);
 }
 
 class _FrappeFormBuilderState extends State<FrappeFormBuilder>
@@ -343,8 +414,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// echo would NOT self-guard and would double-run the pipeline alongside the
   /// explicit cascade (PR#83 finding #1). This flag makes the echo a pure
   /// state-sync no-op so the explicit [_scheduleProgrammaticCascade] is the
-  /// single cascade path. Only raised when the cascade flag is on, so legacy
-  /// behaviour is unchanged.
+  /// single cascade path.
+  ///
+  /// Raised for the synchronous cross-field (`rest`) echo only when the cascade
+  /// flag is on (legacy behaviour otherwise), but ALWAYS for the deferred
+  /// self-key echo — an unguarded self-key echo on a typed field re-fires the
+  /// pipeline every frame with no depth cap (the cap is cascade-gated), so a
+  /// self-referential handler would hang. See the self-key echo in
+  /// [_onFieldValueChanged].
   int _programmaticEchoGuard = 0;
 
   /// Cached `fieldname → DocField` index for O(1) lookups (see [_fieldByName]),
@@ -377,13 +454,22 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// here and [ChildTableField] renders it; cleared on the next edit.
   final Map<String, String> _tableFieldErrors = {};
 
+  /// Child-doctype meta for every `Table` field, keyed by child doctype name.
+  ///
+  /// The mandatory sweep in [_handleSubmit] is SYNCHRONOUS and `getMeta` is
+  /// not, so a row-level check has to read from a cache warmed at init. A
+  /// doctype missing from this map is SKIPPED, never treated as invalid —
+  /// "we could not load the meta" is not "the row is incomplete".
+  final Map<String, DocTypeMeta> _childRowMeta = {};
+
   /// Field types whose widget surfaces a required-empty error through
   /// [_tableFieldErrors] rather than `FormBuilderState.fields[…].invalidate()`
   /// — neither is a `FormBuilderField`, so `invalidate()` is a silent no-op.
   static bool _rendersInlineTableError(String? fieldtype) =>
       fieldtype == 'Table' || fieldtype == 'Table MultiSelect';
 
-  /// Pushes the two per-form inputs onto [FieldFactory] as instance state.
+  /// Pushes the per-form host capabilities onto [FieldFactory] as instance
+  /// state.
   ///
   /// These are deliberately NOT `createField` parameters: that method is
   /// documented as overridable, and Dart requires an override to redeclare
@@ -391,13 +477,69 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// breaks every existing subclass at compile time, and a default value does
   /// not help (a caller holding a `FieldFactory` reference may still pass it
   /// explicitly). Host apps subclass this factory, so the signature is treated
-  /// as frozen. Mirrors how `linkOptionService` / `linkFieldCoordinator` are
-  /// already wired. Re-invoked from [didUpdateWidget] because `meta` can change.
+  /// as frozen — `v2.0.0-beta.2`'s signature is the baseline, pinned by
+  /// `field_factory_override_compat_test.dart`. Mirrors how `linkOptionService`
+  /// / `linkFieldCoordinator` are already wired.
+  ///
+  /// Re-invoked from [didUpdateWidget] because `meta` can change, and from
+  /// [build] because several of these track widget properties that change
+  /// without either of `didUpdateWidget`'s two triggers firing. The load-
+  /// bearing case is [FrappeFormBuilder.pendingAttachmentPaths], which changes
+  /// as picks complete rather than per meta and so has no meta change to ride;
+  /// [FrappeFormBuilder.reclaimAttachment] is the same situation. Calling from
+  /// [build] covers both, and is sufficient: none of these can change without a
+  /// parent rebuild, so a field closure rebuilding on its own still reads the
+  /// value it would have been passed directly.
   void _configureFieldFactoryForMeta() {
     // Frappe stores Single doctypes as mediumtext and exempts them from the
     // implicit Data varchar(140) cap.
     _fieldFactory.capDataLength = !widget.meta.isSingle;
     _fieldFactory.errorTextResolver = _inlineTableErrorFor;
+    _fieldFactory.creationCapture = widget.creationCapture;
+    // The six attachment capabilities below are assigned ONLY when this widget
+    // was actually given one. An unconditional assignment clobbers a host that
+    // configured its own [customFieldFactory] and did not repeat the values
+    // here — and it clobbers silently, which is the whole problem: the host's
+    // queue-aware `reclaimAttachment` was replaced by the delete-on-sight
+    // default, deleting files a queued row still owned, and the other five went
+    // to null (network-only previews, inline uploads instead of queueing). A
+    // plain `??=` is NOT the fix: it would also refuse the UPDATE case, and
+    // `pendingAttachmentPaths` has to keep changing as picks complete.
+    //
+    // These five were `createField` parameters until that was found to break
+    // every host subclass written against the published signature; both call
+    // sites passed exactly `widget.<x>` for all five, so they are uniform per
+    // form and moved here without behaviour change.
+    final reclaim = widget.reclaimAttachment;
+    if (reclaim != null) _fieldFactory.reclaimAttachment = reclaim;
+    if (widget.isOnline != null) _fieldFactory.isOnline = widget.isOnline;
+    if (widget.pendingAttachmentPaths != null) {
+      _fieldFactory.pendingAttachmentPaths = widget.pendingAttachmentPaths;
+    }
+    if (widget.mediaResolver != null) {
+      _fieldFactory.mediaResolver = widget.mediaResolver;
+    }
+    if (widget.isOfflineMode != null) {
+      _fieldFactory.isOfflineMode = widget.isOfflineMode;
+    }
+    if (widget.imagePickSource != null) {
+      _fieldFactory.imagePickSource = widget.imagePickSource;
+    }
+    // Child-grid Link cells resolve to titles with NO host wiring: this widget
+    // already holds the service, so the widget layer never reaches for a
+    // singleton (see the [LinkTitleResolver] typedef doc) and a host does not
+    // have to construct [ChildTableField] itself just to get readable rows.
+    //
+    // Guarded like the six above, and for the same reason: a host that set its
+    // own resolver on a `customFieldFactory` must not have it clobbered when
+    // this builder happens to have been given a service too.
+    final linkService = widget.linkOptionService;
+    if (linkService != null && _fieldFactory.resolveLinkTitle == null) {
+      _fieldFactory.resolveLinkTitle = linkService.getLinkTitle;
+    }
+    if (widget.childRowNoticeBuilder != null) {
+      _fieldFactory.rowNoticeBuilder = widget.childRowNoticeBuilder;
+    }
   }
 
   /// Inline error for a child-table field, for whichever mode is active.
@@ -474,6 +616,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       }
     }
 
+    _prefetchChildRowMeta();
+
     if (widget.linkOptionService != null && widget.useLinkFieldCoordinator) {
       _linkFieldCoordinator = LinkFieldCoordinator(
         meta: widget.meta,
@@ -522,8 +666,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     if (widget.mode == FormBuilderMode.reactive) {
       _controller =
           widget.controller ??
-          FormController(meta: widget.meta, initialData: widget.initialData);
+          FormController(
+            meta: widget.meta,
+            initialData: widget.initialData,
+            parentData: widget.parentFormData,
+          );
       _ownsController = widget.controller == null;
+      // A host-supplied controller never saw the constructor argument above, so
+      // thread `parent` in here too — otherwise parentFormData is silently
+      // ignored and every `parent.<field>` condition falls back to aliasing
+      // `doc`. no-clobber: a controller that already carries parentData wins.
+      if (widget.parentFormData != null && _controller!.parentData == null) {
+        _controller!.parentData = widget.parentFormData;
+      }
       _controller!.fetchLinkedDocument = widget.fetchLinkedDocument;
       // no-clobber: only wire the bridge hook if the controller has none.
       if (widget.onFieldChange != null &&
@@ -615,40 +770,66 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// — i.e. the live `_tabs.length`, which is what the [TabController] length
   /// must match.
   ///
-  /// A plain count of `Tab Break` fields is NOT equivalent and must not be used
-  /// for the [didUpdateWidget] rebuild guard: [_buildFormStructure] skips
-  /// `hidden` fields (so a hidden Tab Break yields no tab) and synthesises an
-  /// implicit leading "Details" tab when content precedes the first Tab Break.
-  /// Counting raw Tab Break fields would miss both, letting the guard skip a
-  /// needed [TabController] rebuild and crash with a length/`_tabs` mismatch.
-  static int _effectiveTabCount(DocTypeMeta meta) {
-    var tabs = 0;
-    var sawContentBeforeFirstTab = false;
-    var inTab = false;
-    for (final field in meta.fields) {
-      if (field.hidden) continue;
-      final type = field.fieldtype;
-      if (type == FieldTypes.tabBreak) {
-        tabs++;
-        inTab = true;
-      } else if (type != FieldTypes.sectionBreak &&
-          type != FieldTypes.columnBreak) {
-        // A real content field outside any tab → implicit "Details" tab.
-        if (!inTab) sawContentBeforeFirstTab = true;
-      }
-    }
-    if (sawContentBeforeFirstTab) tabs++;
-    return tabs;
-  }
+  /// Delegates to [_buildTabsFor] rather than re-counting. A plain count of
+  /// `Tab Break` fields is NOT equivalent (the walk drops `hidden` tabs and
+  /// synthesises an implicit leading "Details" tab), and a second hand-kept
+  /// walk is exactly what previously let this drift out of lockstep: any
+  /// divergence lets the [didUpdateWidget] guard skip a needed [TabController]
+  /// rebuild and crash on a length/`_tabs` mismatch. One walk, one answer.
+  static int _effectiveTabCount(DocTypeMeta meta) => _buildTabsFor(meta).length;
 
-  void _buildFormStructure() {
-    _tabs.clear();
+  /// Builds the tab → section → column tree for [meta].
+  ///
+  /// Pure and static so [_effectiveTabCount] can ask for exactly the list
+  /// [_buildFormStructure] will install, instead of approximating it with a
+  /// parallel walk.
+  ///
+  /// **`hidden` on a layout break hides the CONTAINER; it does not dissolve the
+  /// BOUNDARY.** Frappe Desk builds its layout by dispatching on `fieldtype`
+  /// with no `hidden` filter at all (`layout.js` `render()`), so every
+  /// Tab/Section/Column Break constructs its container unconditionally
+  /// (`make_tab` / `make_section` / `make_column`, same file). Visibility is
+  /// applied afterwards, to the container: `tab.js`
+  /// (`hide = df.hidden || df.hidden_due_to_dependency`, which `layout.js`
+  /// then filters out of `visible_tabs`), and `section.js` / `column.js`
+  /// (`wrapper.toggleClass("hide-control", hide)`). Verified against Frappe
+  /// v16.17.5; these four call sites have had this shape since the tabbed
+  /// layout landed, so v15 behaves the same — though only v16 was read.
+  ///
+  /// Skipping a hidden break instead REPARENTS every field that follows it into
+  /// the previous container, where it silently inherits that container's
+  /// `depends_on` gate — a gate Desk never applies to it. It also disagrees
+  /// with the save-payload walk in `_handleSubmit`, which keys on `fieldtype`
+  /// alone (as Desk does) and therefore attributes those fields to the hidden
+  /// container. Same metadata, two different answers about which section a
+  /// field is in.
+  ///
+  /// **Scope: the boundary only.** A hidden container is still RENDERED here,
+  /// which Desk does not do — Desk hides the wrapper, so its children go with
+  /// it. Honouring that is a separate change and deliberately not bundled in,
+  /// because it is only safe once a doctype's metadata is consistent with it: a
+  /// `hidden: 1` Section Break that opens a form, or that encloses a `reqd`
+  /// field, currently relies on this widget rendering its contents. Dropping
+  /// those fields would empty the form, or block Save on a mandatory field the
+  /// user cannot reach. So this fixes the disagreement between the two walks
+  /// and leaves container visibility unimplemented — as it already was — rather
+  /// than half-implementing it.
+  static List<_FormTab> _buildTabsFor(DocTypeMeta meta) {
+    final tabs = <_FormTab>[];
     _FormTab? currentTab;
     _FormSection? currentSection;
     _FormColumn? currentColumn;
 
-    for (final field in widget.meta.fields) {
-      if (field.hidden) continue;
+    for (final field in meta.fields) {
+      // Layout breaks are NOT skipped when hidden — see the note above. Hidden
+      // DATA fields still are: Desk hides those too, and every downstream
+      // consumer here (`_fieldTabIndex`, the mandatory sweep) assumes a field
+      // present in the tree is one the user can reach.
+      final isLayoutBreak =
+          field.fieldtype == FieldTypes.tabBreak ||
+          field.fieldtype == FieldTypes.sectionBreak ||
+          field.fieldtype == FieldTypes.columnBreak;
+      if (field.hidden && !isLayoutBreak) continue;
 
       switch (field.fieldtype) {
         case FieldTypes.tabBreak:
@@ -664,7 +845,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             currentSection = null;
           }
           if (currentTab != null) {
-            _tabs.add(currentTab);
+            tabs.add(currentTab);
           }
           currentTab = _FormTab(field);
           currentSection = null;
@@ -693,7 +874,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             );
             currentSection.columns.add(currentColumn);
           }
-          currentColumn = _FormColumn();
+          currentColumn = _FormColumn(field);
           break;
 
         default:
@@ -720,8 +901,16 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       currentTab.sections.add(currentSection);
     }
     if (currentTab != null) {
-      _tabs.add(currentTab);
+      tabs.add(currentTab);
     }
+
+    return tabs;
+  }
+
+  void _buildFormStructure() {
+    _tabs
+      ..clear()
+      ..addAll(_buildTabsFor(widget.meta));
 
     // Build field -> tab index mapping for focusing invalid fields
     _fieldTabIndex.clear();
@@ -815,12 +1004,98 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     required bool onError,
   }) {
     if (expr == null || expr.isEmpty) return defaultValue;
-    return DependsOnEvaluator.evaluate(expr, _evalData, onError: onError);
+    // [onError] is the fallback for an expression that is present but cannot be
+    // evaluated: an unparseable mandatory_depends_on must not make the field
+    // permanently mandatory.
+    return DependsOnEvaluator.evaluate(
+      expr,
+      _evalData,
+      parentData: effectiveParentFormData,
+      defaultOnError: onError,
+    );
   }
 
   bool _shouldShowField(DocField field) =>
       // An unparseable expression shows the field rather than hiding data.
       _evaluateDepends(field.dependsOn, true, onError: true);
+
+  /// Container visibility, matching Frappe Desk.
+  ///
+  /// Desk hides a layout container when its own `hidden` is set or its
+  /// `depends_on` is false, and the children go with the wrapper —
+  /// `Layout.refresh_dependency` (frappe/public/js/frappe/form/layout.js) walks
+  /// `fields_list.concat(this.tabs)`, stamps `hidden_due_to_dependency`, and
+  /// `BaseControl.get_status` then returns `"None"` for either flag. This
+  /// widget previously honoured only `depends_on`, and only on Section Breaks,
+  /// so a `hidden: 1` container still rendered its contents.
+  ///
+  /// Desk hides the WRAPPER; it does not prune the fields. Their values stay in
+  /// the document and are still submitted. This method is therefore only ever
+  /// consulted for RENDERING — `_buildCompleteFormData` and the save payload are
+  /// untouched, which is what makes honouring container visibility safe.
+  ///
+  /// ## The one deliberate divergence
+  ///
+  /// Frappe's server-side `_validate_mandatory` selects on `reqd` alone
+  /// (`frappe/model/base_document.py`: `self.meta.get("fields", {"reqd": ("=", 1)})`)
+  /// — it never consults `hidden` or `depends_on`. So a `reqd` field inside a
+  /// hidden container is still demanded by the server while Desk refuses to
+  /// show it: the document becomes unsaveable with no field to fix. Desk has
+  /// that flaw too; it is broken metadata rather than a rendering choice.
+  ///
+  /// Rather than reproduce a trap, a container that encloses a `reqd` field
+  /// with no value STAYS VISIBLE so the operator can satisfy the server. On
+  /// this project that is 33 fields across 6 doctypes, including three Gunny
+  /// Bag DO doctypes whose entire form sits inside a `hidden: 1` Section Break
+  /// at index 0 — strict parity would render them blank and unsaveable.
+  ///
+  /// The valve is deliberately narrow: it fires only when the field is BOTH
+  /// mandatory AND empty, so it cannot keep a container alive once the data is
+  /// there, and it disappears by itself the moment the metadata is corrected.
+  bool _shouldShowContainer(DocField container, Iterable<DocField> enclosed) {
+    final gatedOut =
+        container.hidden ||
+        !_evaluateDepends(container.dependsOn, true, onError: true);
+    if (!gatedOut) return true;
+
+    for (final f in enclosed) {
+      if (!f.isDataField) continue;
+      if (!_isFieldRequired(f)) continue;
+      if (_hasValueFor(f)) continue;
+      _warnUnsatisfiableContainer(container, f);
+      return true;
+    }
+    return false;
+  }
+
+  /// Whether [field] currently holds something the server would accept as a
+  /// value. Mirrors `has_content` in `base_document.py` closely enough for the
+  /// valve: empty string, null and empty list all count as missing.
+  bool _hasValueFor(DocField field) {
+    final name = field.fieldname;
+    if (name == null) return false;
+    final v = _controller?.valueOf(name).value ?? widget.initialData?[name];
+    if (v == null) return false;
+    if (v is String) return v.trim().isNotEmpty;
+    if (v is Iterable) return v.isNotEmpty;
+    if (v is Map) return v.isNotEmpty;
+    return true;
+  }
+
+  /// Logged once per container so a broken doctype is visible in the logs
+  /// rather than silently papered over.
+  static final Set<String> _warnedContainers = <String>{};
+  void _warnUnsatisfiableContainer(DocField container, DocField field) {
+    final key = '${widget.meta.name}.${container.fieldname}.${field.fieldname}';
+    if (!_warnedContainers.add(key)) return;
+    sdkLog(
+      'FormBuilder: ${widget.meta.name} — container "${container.fieldname}" is '
+      'hidden by metadata but encloses the mandatory, empty field '
+      '"${field.fieldname}". Keeping it visible: the server validates reqd '
+      'without consulting hidden, so hiding it would make the document '
+      'unsaveable with nothing to fix. Correct the doctype metadata.',
+    );
+  }
 
   bool _isFieldRequired(DocField field) =>
       field.reqd ||
@@ -918,7 +1193,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   ) {
     var decoration = formStyle.fieldDecoration?.call(field);
     if (widget.translate != null && decoration != null) {
-      final labelText = widget.translate!(field.label ?? field.fieldname ?? '');
+      final labelText = widget.translate!(field.displayLabel);
       decoration = decoration.copyWith(
         // When showFieldLabel=true, BaseField renders the external label above
         // the box; setting labelText here would produce a second floating label
@@ -1012,8 +1287,14 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// [FrappeFormBuilder.onFieldChange], depends_on rebuild). Extracted from the
   /// field `onChanged` callback so a value set programmatically can re-enter the
   /// SAME pipeline when [FrappeFormBuilder.cascadeProgrammaticChanges] is on —
-  /// see [_scheduleProgrammaticCascade]. When the flag is off this is
-  /// byte-identical to the previous inline `onChanged`.
+  /// see [_scheduleProgrammaticCascade].
+  ///
+  /// With the flag off this is the previous inline `onChanged` **except on the
+  /// self-key path**, where two ungated fixes apply: the widget patch is
+  /// deferred one frame, and its echo is swallowed to a state-sync. So a
+  /// depth-0 change that arrives while that deferred `patchValue` is in flight
+  /// no longer re-runs the pipeline. Only reachable when a handler patches the
+  /// field currently changing; see `doc/COMPUTED_FIELD_CASCADE.md`.
   ///
   /// [cascadeDepth] > 0 marks a programmatic cascade re-fire: the field's value
   /// is already in [_formData] (the parent patch set it), so `oldValue == value`
@@ -1032,7 +1313,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // cascade the explicit re-fire (cascadeDepth > 0, dispatched post-frame after
     // the guard is released) is the sole re-fire path, so this synchronous echo
     // only syncs form state and returns without re-running the pipeline.
-    if (cascade && _programmaticEchoGuard > 0 && cascadeDepth == 0) {
+    //
+    // NOT gated on [cascade]: the deferred self-key echo below raises this guard
+    // unconditionally (see the comment there), so this check must honour it with
+    // the flag off too — otherwise a self-referential handler on a typed field
+    // re-fires every frame with no depth cap (the cap is cascade-gated).
+    if (_programmaticEchoGuard > 0 && cascadeDepth == 0) {
       if (field.fieldname != null) {
         if (value == null) {
           _formData.remove(field.fieldname);
@@ -1162,13 +1448,23 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             final selfValue = patches[selfKey];
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
-              if (cascade) _programmaticEchoGuard++;
+              // Guard raised UNCONDITIONALLY, not just when cascading. The
+              // deferred patchValue re-fires this field's onChanged; for a typed
+              // field (Check/Date/Rating) FieldNormalizer changes the value's
+              // representation, so the echoed value never equals the doc-space
+              // value in _formData, `changed` stays true, and a self-referential
+              // handler re-fires forever across postFrameCallbacks — an uncapped
+              // infinite hang, because the depth cap lives only in the
+              // cascade-gated [_scheduleProgrammaticCascade]. Making the echo a
+              // pure state-sync no-op bounds it regardless of the flag; no finite
+              // cascade-off case relies on this echo re-running the pipeline.
+              _programmaticEchoGuard++;
               try {
                 _formKey.currentState?.patchValue(
                   _normalizePatchValues({selfKey: selfValue}),
                 );
               } finally {
-                if (cascade) _programmaticEchoGuard--;
+                _programmaticEchoGuard--;
               }
             });
           }
@@ -1224,12 +1520,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       final newValue = entry.value;
       // Child-table payloads are patched wholesale, not treated as field edits.
       if (newValue is List || newValue is Map) continue;
-      // Value-equality: skip fields whose value did not actually change.
-      if (_normForCascade(prior[entry.key]) == _normForCascade(newValue)) {
-        continue;
-      }
       final field = _fieldByName[entry.key];
       if (field == null) continue;
+      // Value-equality: skip fields whose value did not actually change.
+      if (_cascadeValuesEqual(field, prior[entry.key], newValue)) {
+        continue;
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _onFieldValueChanged(field, newValue, cascadeDepth: depth + 1);
@@ -1238,9 +1534,40 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     }
   }
 
-  /// Normalise for cascade value-equality: trimmed string form, so `5`/`"5"`
-  /// compare equal and a null/absent value never spuriously "changes".
-  static String? _normForCascade(dynamic v) => v?.toString().trim();
+  /// Cascade value-equality for [field]. Baseline is trimmed-string equality, so
+  /// `5`/`"5"` compare equal and a null/absent value never spuriously "changes".
+  ///
+  /// For NUMERIC fieldtypes only, both operands are additionally compared as
+  /// numbers, so `10`/`"10.0"`/`10.00` are equal and a representation-only
+  /// change (e.g. a Float field re-emitting `"10.0"` for `10`) does not trigger a
+  /// spurious self-terminating re-fire. Restricted to numeric fieldtypes on
+  /// purpose: a Link/Select/Data id like `"007"` must NOT compare equal to `"7"`,
+  /// which is what an unconditional numeric compare would do.
+  static bool _cascadeValuesEqual(DocField field, dynamic a, dynamic b) {
+    if (_isNumericFieldType(field.fieldtype)) {
+      final na = _asNum(a);
+      final nb = _asNum(b);
+      if (na != null && nb != null) return na == nb;
+    }
+    return a?.toString().trim() == b?.toString().trim();
+  }
+
+  /// Fieldtypes whose values are numbers, so a representation change carries no
+  /// meaning for cascade purposes.
+  static bool _isNumericFieldType(String? fieldtype) =>
+      fieldtype == FieldTypes.int ||
+      fieldtype == FieldTypes.float ||
+      fieldtype == FieldTypes.currency ||
+      fieldtype == FieldTypes.percent ||
+      fieldtype == FieldTypes.rating;
+
+  /// Parse [v] to a [num] (int or double), or null if it is not numeric.
+  static num? _asNum(dynamic v) {
+    if (v is num) return v;
+    final s = v?.toString().trim();
+    if (s == null || s.isEmpty) return null;
+    return num.tryParse(s);
+  }
 
   Widget _buildFieldWidget(DocField field) {
     if (widget.mode == FormBuilderMode.reactive && _controller != null) {
@@ -1291,26 +1618,39 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       parentFormData: effectiveParentFormData,
       getLinkFilterBuilder: widget.getLinkFilterBuilder,
       childTableFormBuilder: widget.getMeta != null
-          ? (childMeta, initialData, onSubmit, {registerSubmit}) =>
-                FrappeFormBuilder(
-                  meta: childMeta,
-                  initialData: initialData,
-                  onSubmit: onSubmit,
-                  registerSubmit: registerSubmit,
-                  getMeta: widget.getMeta,
-                  linkOptionService: widget.linkOptionService,
-                  useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
-                  fileUrlBase: widget.fileUrlBase,
-                  imageHeaders: widget.imageHeaders,
-                  // fetch linked document for child doctype.
-                  fetchLinkedDocument: widget.fetchLinkedDocument,
-                  translate: widget.translate,
-                  onButtonPressed: widget.onButtonPressed,
-                  onFieldChange: widget.onFieldChange,
-                  parentFormData: effectiveParentFormData,
-                  getLinkFilterBuilder: widget.getLinkFilterBuilder,
-                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
-                )
+          ? (
+              childMeta,
+              initialData,
+              onSubmit, {
+              registerSubmit,
+              bool readOnly = false,
+            }) => FrappeFormBuilder(
+              meta: childMeta,
+              initialData: initialData,
+              onSubmit: onSubmit,
+              registerSubmit: registerSubmit,
+              readOnly: readOnly,
+              getMeta: widget.getMeta,
+              linkOptionService: widget.linkOptionService,
+              useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+              uploadFile: widget.uploadFile,
+              fileUrlBase: widget.fileUrlBase,
+              imageHeaders: widget.imageHeaders,
+              reclaimAttachment: widget.reclaimAttachment,
+              isOnline: widget.isOnline,
+              pendingAttachmentPaths: widget.pendingAttachmentPaths,
+              mediaResolver: widget.mediaResolver,
+              isOfflineMode: widget.isOfflineMode,
+              imagePickSource: widget.imagePickSource,
+              // fetch linked document for child doctype.
+              fetchLinkedDocument: widget.fetchLinkedDocument,
+              translate: widget.translate,
+              onButtonPressed: widget.onButtonPressed,
+              onFieldChange: widget.onFieldChange,
+              parentFormData: effectiveParentFormData,
+              getLinkFilterBuilder: widget.getLinkFilterBuilder,
+              cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
+            )
           : null,
       onButtonPressed: widget.onButtonPressed,
       onChanged: (value) => _onFieldValueChanged(field, value),
@@ -1341,6 +1681,15 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   }
 
   Widget _buildColumn(_FormColumn column) {
+    // Column Break visibility, same Desk rule as sections. A hidden or
+    // gated-out column drops its fields from the RENDER only; they remain in
+    // the document and the save payload.
+    final columnField = column.columnField;
+    if (columnField != null &&
+        !_shouldShowContainer(columnField, column.fields)) {
+      return const SizedBox.shrink();
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: column.fields.map((field) => _buildFieldWidget(field)).toList(),
@@ -1388,8 +1737,13 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     if (section.columns.isEmpty) return const SizedBox.shrink();
 
-    // Evaluate section-level depends_on — hide entire section if condition is false
-    if (!_shouldShowField(section.sectionField)) {
+    // Section visibility, Desk-style: the section's own `hidden` AND its
+    // `depends_on`, with the mandatory-field valve described on
+    // [_shouldShowContainer]. Previously only `depends_on` was consulted, so a
+    // `hidden: 1` Section Break still rendered everything inside it.
+    if (!_shouldShowContainer(section.sectionField, [
+      for (final col in section.columns) ...col.fields,
+    ])) {
       return const SizedBox.shrink();
     }
 
@@ -1802,7 +2156,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         if (field.dependsOn != null && field.dependsOn!.isNotEmpty) {
           // Evaluate against the merged formValues so the latest user
           // changes drive the visibility decision.
-          if (!DependsOnEvaluator.evaluate(field.dependsOn, formValues)) {
+          if (!DependsOnEvaluator.evaluate(
+            field.dependsOn,
+            formValues,
+            parentData: effectiveParentFormData,
+          )) {
             continue;
           }
         }
@@ -1859,10 +2217,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       if (f.fieldname == null) continue;
       final tabHidden =
           currentTabDeps != null &&
-          !DependsOnEvaluator.evaluate(currentTabDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentTabDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       final secHidden =
           currentSectionDeps != null &&
-          !DependsOnEvaluator.evaluate(currentSectionDeps, dataForDepends);
+          !DependsOnEvaluator.evaluate(
+            currentSectionDeps,
+            dataForDepends,
+            parentData: effectiveParentFormData,
+          );
       if (tabHidden || secHidden) {
         hiddenByContainer.add(f.fieldname!);
       }
@@ -1875,7 +2241,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       );
       if (field.fieldtype == '_missing_') return false;
       if (field.dependsOn == null || field.dependsOn!.isEmpty) return false;
-      return !DependsOnEvaluator.evaluate(field.dependsOn, dataForDepends);
+      return !DependsOnEvaluator.evaluate(
+        field.dependsOn,
+        dataForDepends,
+        parentData: effectiveParentFormData,
+      );
     });
 
     // Frappe-parity mandatory sweep over the COMPLETE payload.
@@ -1896,7 +2266,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           field.reqd ||
           (field.mandatoryDependsOn != null &&
               field.mandatoryDependsOn!.isNotEmpty &&
-              // `onError: false` is NOT optional here. `_isFieldRequired`
+              // `defaultOnError: false` is NOT optional here. `_isFieldRequired`
               // (same file) passes it, so without it an unparseable
               // `mandatory_depends_on` makes this sweep block Save on a field
               // the widget never marked required and never drew an asterisk
@@ -1905,7 +2275,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
               DependsOnEvaluator.evaluate(
                 field.mandatoryDependsOn,
                 dataForDepends,
-                onError: false,
+                parentData: effectiveParentFormData,
+                defaultOnError: false,
               ));
       if (!required) continue;
       final v = completeFormData[name];
@@ -1964,7 +2335,133 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       return;
     }
 
+    // Row-level mandatory cells, which no layer above can see: the parent
+    // sweep judges a `Table` only by whether the LIST is empty.
+    final childRowErrors = _missingChildRowMandatories(
+      completeFormData,
+      dataForDepends,
+    );
+    if (childRowErrors.isNotEmpty) {
+      final firstTable = childRowErrors.keys.first;
+      final tabIndex = _fieldTabIndex[firstTable];
+      if (tabIndex != null &&
+          _tabs.length > 1 &&
+          _tabController.index != tabIndex) {
+        setState(() {
+          _tabController.index = tabIndex;
+        });
+      }
+      setState(() {
+        _tableFieldErrors
+          ..clear()
+          ..addAll(childRowErrors);
+      });
+      widget.onValidationFailed?.call();
+      return;
+    }
+
     widget.onSubmit?.call(completeFormData);
+  }
+
+  /// Warms [_childRowMeta] for every `Table` field so the submit-time row
+  /// sweep can run synchronously. Failures are swallowed on purpose: a table
+  /// whose meta never arrives is simply not row-checked.
+  void _prefetchChildRowMeta() {
+    final getMeta = widget.getMeta;
+    if (getMeta == null) return;
+    for (final field in widget.meta.fields) {
+      if (field.fieldtype != 'Table') continue;
+      final child = field.options;
+      if (child == null || child.isEmpty) continue;
+      if (_childRowMeta.containsKey(child)) continue;
+      // `getMeta` is host-supplied and may throw SYNCHRONOUSLY — the app's
+      // closure reaches a service that is absent in widget tests and raises
+      // before any Future exists, so `.catchError` never sees it and the
+      // exception escapes initState into the widget tree. try/catch first,
+      // then catchError for the async half.
+      try {
+        getMeta(child)
+            .then((m) {
+              if (!mounted) return;
+              _childRowMeta[child] = m;
+            })
+            .catchError((_) {});
+      } catch (_) {
+        // Meta unavailable -> this table is simply not row-checked.
+      }
+    }
+  }
+
+  /// Mandatory cells INSIDE child-table rows, as "Row #N: Label is required".
+  ///
+  /// The parent sweep in [_handleSubmit] asks only `v is List && v.isEmpty` of
+  /// a `Table` field, so a table holding rows whose mandatory cells are empty
+  /// is "non-empty" and passes every client-side check. It is then refused by
+  /// the server as a `MandatoryError` naming the child doctype and row number
+  /// — text no client layer can map back to a widget, so nothing can switch
+  /// tab or scroll to the offending cell.
+  ///
+  /// This is easy to hit whenever a client script seeds child rows from a
+  /// server lookup with their value columns left null: the rows exist, the
+  /// list is non-empty, and the operator gets no asterisk and no inline error
+  /// anywhere in the form.
+  ///
+  /// Returns table-fieldname -> message, ready for [_tableFieldErrors].
+  Map<String, String> _missingChildRowMandatories(
+    Map<String, dynamic> completeFormData,
+    Map<String, dynamic> dataForDepends,
+  ) {
+    final out = <String, String>{};
+    for (final field in widget.meta.fields) {
+      if (field.fieldtype != 'Table') continue;
+      final name = field.fieldname;
+      final child = field.options;
+      if (name == null || child == null || field.hidden) continue;
+      final childMeta = _childRowMeta[child];
+      if (childMeta == null) continue; // meta unknown -> do not judge the rows
+      final rows = completeFormData[name];
+      if (rows is! List || rows.isEmpty) continue;
+
+      for (var i = 0; i < rows.length; i++) {
+        final row = rows[i];
+        if (row is! Map) continue;
+        for (final cf in childMeta.fields) {
+          final cn = cf.fieldname;
+          if (cn == null || cn.isEmpty) continue;
+          if (cf.hidden || !cf.isDataField) continue;
+          var required = cf.reqd;
+          if (!required &&
+              cf.mandatoryDependsOn != null &&
+              cf.mandatoryDependsOn!.isNotEmpty) {
+            // The ROW is the data for a child field's condition; the parent
+            // form is its `parentData`. `defaultOnError: false` matches the
+            // parent sweep — an unparseable expression must not invent a
+            // requirement the widget never drew an asterisk for.
+            required = DependsOnEvaluator.evaluate(
+              cf.mandatoryDependsOn,
+              Map<String, dynamic>.from(row),
+              parentData: dataForDepends,
+              defaultOnError: false,
+            );
+          }
+          if (!required) continue;
+          final v = row[cn];
+          final missing =
+              v == null ||
+              (v is String && v.trim().isEmpty) ||
+              (v is List && v.isEmpty);
+          if (!missing) continue;
+          // The first offender per table is enough to steer the operator there.
+          out[name] =
+              '${field.displayLabel} '
+              'Row #${i + 1}: '
+              '${sdkTr('{0} is required', [cf.displayLabel])}';
+          break;
+        }
+        if (out.containsKey(name)) break;
+      }
+    }
+    return out;
   }
 
   /// Assembles the full form data map: every non-hidden data field with
@@ -2124,27 +2621,39 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
           // disposes its controller on sheet close (add=create / delete=dispose
           // / reorder fall out of the List<map> model — no per-row machinery).
           childTableFormBuilder: widget.getMeta != null
-              ? (childMeta, initialData, onSubmit, {registerSubmit}) =>
-                    FrappeFormBuilder(
-                      mode: FormBuilderMode.reactive,
-                      meta: childMeta,
-                      initialData: initialData,
-                      onSubmit: onSubmit,
-                      registerSubmit: registerSubmit,
-                      getMeta: widget.getMeta,
-                      linkOptionService: widget.linkOptionService,
-                      useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
-                      fileUrlBase: widget.fileUrlBase,
-                      imageHeaders: widget.imageHeaders,
-                      fetchLinkedDocument: widget.fetchLinkedDocument,
-                      translate: widget.translate,
-                      onButtonPressed: widget.onButtonPressed,
-                      onFieldChange: widget.onFieldChange,
-                      parentFormData: widget.parentFormData ?? c.values,
-                      getLinkFilterBuilder: widget.getLinkFilterBuilder,
-                      cascadeProgrammaticChanges:
-                          widget.cascadeProgrammaticChanges,
-                    )
+              ? (
+                  childMeta,
+                  initialData,
+                  onSubmit, {
+                  registerSubmit,
+                  bool readOnly = false,
+                }) => FrappeFormBuilder(
+                  mode: FormBuilderMode.reactive,
+                  meta: childMeta,
+                  initialData: initialData,
+                  onSubmit: onSubmit,
+                  registerSubmit: registerSubmit,
+                  readOnly: readOnly,
+                  getMeta: widget.getMeta,
+                  linkOptionService: widget.linkOptionService,
+                  useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                  uploadFile: widget.uploadFile,
+                  fileUrlBase: widget.fileUrlBase,
+                  imageHeaders: widget.imageHeaders,
+                  reclaimAttachment: widget.reclaimAttachment,
+                  isOnline: widget.isOnline,
+                  pendingAttachmentPaths: widget.pendingAttachmentPaths,
+                  mediaResolver: widget.mediaResolver,
+                  isOfflineMode: widget.isOfflineMode,
+                  imagePickSource: widget.imagePickSource,
+                  fetchLinkedDocument: widget.fetchLinkedDocument,
+                  translate: widget.translate,
+                  onButtonPressed: widget.onButtonPressed,
+                  onFieldChange: widget.onFieldChange,
+                  parentFormData: widget.parentFormData ?? c.values,
+                  getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
+                )
               : null,
         );
         if (w == null) return const SizedBox.shrink();
@@ -2157,6 +2666,66 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     );
   }
 
+  /// Last-resort rendering when the metadata yields no fields.
+  ///
+  /// `_buildTabsFor` produces no tabs when every data field is `hidden` or the
+  /// meta is empty — a stale/partial local meta row is the usual cause (see
+  /// `MetaService.getMeta`, which now treats an empty cached meta as a miss).
+  /// The values we were given are still real, so display them read-only and say
+  /// plainly that the layout is unavailable, instead of showing nothing.
+  Widget _buildMetalessFallback() {
+    final data = <String, dynamic>{...?widget.initialData, ..._formData}
+      ..removeWhere(
+        (k, v) =>
+            k.startsWith('__') ||
+            const {
+              'doctype',
+              'parent',
+              'parenttype',
+              'parentfield',
+              'idx',
+              'owner',
+              'creation',
+              'modified',
+              'modified_by',
+              'docstatus',
+              'name',
+            }.contains(k) ||
+            v == null ||
+            (v is String && v.trim().isEmpty) ||
+            (v is Iterable && v.isEmpty),
+      );
+
+    if (data.isEmpty) {
+      return const Center(child: Text('No fields to display'));
+    }
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Text(
+            'Layout unavailable — showing stored values.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        for (final e in data.entries)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(e.key, style: Theme.of(context).textTheme.labelSmall),
+                const SizedBox(height: 2),
+                Text('${e.value}'),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Drop the per-build eval-data memo. Safe as a build-scoped cache because
@@ -2165,8 +2734,18 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // `_buildSectionContent`) runs inside this build; `_formData` mutations all
     // go through setState, which lands here again before anything re-reads it.
     _resetEvalDataCache();
+    // Refresh the factory's instance-state hooks. `didUpdateWidget` only
+    // reconfigures on a meta / initialData change, so a host that swaps
+    // `reclaimAttachment` alone would otherwise leave a stale one in place and
+    // the field would delete bytes the queue still owns.
+    _configureFieldFactoryForMeta();
     if (_tabs.isEmpty) {
-      return const Center(child: Text('No fields to display'));
+      // The metadata produced nothing renderable. Rather than a dead end, show
+      // whatever values we were handed — a read-only child-table sheet passes
+      // the row itself as `initialData`, so the operator can still READ the
+      // record they tapped. Losing the data behind "No fields to display" is
+      // what made this look like a broken feature rather than a missing meta.
+      return _buildMetalessFallback();
     }
     final formStyle = widget.style ?? DefaultFormStyle.standard;
 

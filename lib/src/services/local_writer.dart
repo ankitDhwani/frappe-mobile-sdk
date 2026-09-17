@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
@@ -5,11 +7,18 @@ import '../database/field_type_mapping.dart';
 import '../database/normalize_for_search.dart';
 import '../database/schema/system_columns.dart';
 import '../database/sqlite_utils.dart';
+import '../database/daos/pending_attachment_dao.dart';
 import '../database/table_name.dart';
 import '../models/doc_type_meta.dart';
 import '../models/meta_resolver.dart';
 import '../sync/child_table_info.dart';
+import '../utils/media_store.dart';
+import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
+
+/// Docfield types whose value is a single file reference that the offline
+/// producer must copy + queue for upload.
+const Set<String> kAttachmentFieldTypes = {'Attach', 'Attach Image', 'Image'};
 
 /// Writes a form-save payload to the per-doctype `docs__<doctype>` parent
 /// table and `docs__<child_doctype>` child tables in a single transaction.
@@ -228,6 +237,76 @@ class LocalWriter {
     if (!await sqliteTableExists(txn, parentTable)) return;
     final nowMs = DateTime.now().toUtc().millisecondsSinceEpoch;
 
+    // Offline attachment producer: any attach-field value that is still a
+    // local file path is copied-at-pick already, so here we only queue it
+    // (with its exact parent/child coordinates) and replace the stored value
+    // with a `pending:<id>` marker the push pipeline resolves to a file_url.
+    final attachDao = PendingAttachmentDao(txn);
+    Future<Object?> queueIfLocalAttachment({
+      required Object? value,
+      required String fieldType,
+      required String rowUuid,
+      required String rowDoctype,
+      required String fieldname,
+    }) async {
+      if (!kAttachmentFieldTypes.contains(fieldType)) return value;
+
+      // A CLEARED attach field (discarded by the user) must drop its queued
+      // row and staged file. Without this the row survives with the column
+      // emptied, and the push gate then blocks the document forever on an
+      // attachment nothing references — or, if it uploads, the writeback
+      // resurrects the url the user just removed.
+      //
+      // Scoped to null/empty ONLY, not "anything that is not a local path": a
+      // synced field holds `/files/...` and its `done` row is the writeback
+      // backstop, so widening this would delete that row on every unrelated
+      // re-save for no benefit.
+      final isCleared =
+          value == null || (value is String && value.trim().isEmpty);
+      if (isCleared) {
+        await _dropQueuedAttachment(txn, rowUuid, fieldname);
+        return value;
+      }
+
+      if (!isLocalAttachmentPath(value)) return value;
+      final path = (value as String).trim();
+      // Idempotency: the (parent_uuid, parent_fieldname) index is not UNIQUE,
+      // so a re-pick/re-save would otherwise stack duplicate rows. Drop any
+      // prior queue row for this exact field — AND its staged file, or the
+      // bytes leak with nothing left referencing them.
+      //
+      // This is also how a `rejected` attachment is replaced: the old row is
+      // destroyed and a fresh `pending` one takes its place, so it never
+      // inherits a stale retry count or error. A rejected row is never
+      // resurrected in place.
+      // `keepPath` matters: a re-save that re-supplies the SAME staged path
+      // must not delete the file it is about to queue.
+      await _dropQueuedAttachment(txn, rowUuid, fieldname, keepPath: path);
+      // Size and MIME are derived HERE rather than carried from the pick:
+      // the staged file is on disk and its path is the field value, so there is
+      // nothing to plumb through the form. `fileName` is the staged basename,
+      // which IS the user's original filename — staging keeps the name and puts
+      // uniqueness in the parent directory.
+      int? sizeBytes;
+      try {
+        sizeBytes = await File(path).length();
+      } catch (e, st) {
+        sdkLog('LocalWriter: could not stat staged attachment $path — $e\n$st');
+      }
+      final id = await attachDao.enqueue(
+        parentDoctype: rowDoctype,
+        parentUuid: rowUuid,
+        parentFieldname: fieldname,
+        topParentUuid: mobileUuid,
+        topParentDoctype: parentDoctype,
+        localPath: path,
+        fileName: path.split('/').last,
+        mimeType: mimeTypeForPath(path),
+        sizeBytes: sizeBytes,
+      );
+      return '$kPendingMarkerPrefix$id';
+    }
+
     final childInfos = <String, ChildTableInfo>{};
     for (final f in parentMeta.fields) {
       final ft = f.fieldtype;
@@ -291,7 +370,14 @@ class LocalWriter {
       if (_systemParentColumns.contains(name)) continue;
       if (!data.containsKey(name)) continue;
 
-      final v = _coerce(data[name], sqlType);
+      var v = _coerce(data[name], sqlType);
+      v = await queueIfLocalAttachment(
+        value: v,
+        fieldType: type,
+        rowUuid: mobileUuid,
+        rowDoctype: parentDoctype,
+        fieldname: name,
+      );
       parentRow[name] = v;
 
       if (isLinkFieldType(type)) {
@@ -317,6 +403,23 @@ class LocalWriter {
       final childInfo = entry.value;
       final childTable = normalizeDoctypeTableName(childInfo.doctype);
       if (!await sqliteTableExists(txn, childTable)) continue;
+
+      // Columns this child table ACTUALLY has, which is not the same set as
+      // the columns its meta declares. `saveDocument` heals drift on the
+      // PARENT table only (`reconcileParentTableForMeta`) — there is no child
+      // equivalent anywhere in the SDK — so a child doctype that gained a
+      // field after this table was created still has a table without that
+      // column. Writing the meta's view of the fields would then throw
+      // `no such column` from inside this transaction and fail the WHOLE
+      // save, losing the parent record too.
+      //
+      // Read from `txn`, never the outer Database: a query through the outer
+      // handle while this transaction holds the sqflite write queue deadlocks.
+      final childColumns = <String>{};
+      for (final r in await txn.rawQuery('PRAGMA table_info($childTable)')) {
+        final n = r['name'] as String?;
+        if (n != null) childColumns.add(n);
+      }
 
       await txn.delete(
         childTable,
@@ -356,8 +459,26 @@ class LocalWriter {
           if (cSqlType == null) continue;
           if (_systemChildColumns.contains(cn)) continue;
           if (!cr.containsKey(cn)) continue;
+          if (!childColumns.contains(cn)) {
+            // Drifted schema (see the PRAGMA above). Skip the field rather
+            // than fail the save, and say so — a silently dropped value is
+            // exactly the kind of thing that surfaces later as "the data went
+            // missing".
+            sdkLog(
+              'LocalWriter.writeParentInTxn: $childTable has no column "$cn" '
+              '(schema drift) — dropping that value for this row',
+            );
+            continue;
+          }
 
-          final v = _coerce(cr[cn], cSqlType);
+          var v = _coerce(cr[cn], cSqlType);
+          v = await queueIfLocalAttachment(
+            value: v,
+            fieldType: ct,
+            rowUuid: childUuid,
+            rowDoctype: childInfo.doctype,
+            fieldname: cn,
+          );
           childRow[cn] = v;
           if (isLinkFieldType(ct)) {
             childRow['${cn}__is_local'] =
@@ -508,5 +629,38 @@ class LocalWriter {
     final s = v.toString().trim();
     if (s.isEmpty) return null;
     return int.tryParse(s);
+  }
+}
+
+/// Deletes any queued attachment row for `(rowUuid, fieldname)` and its staged
+/// file.
+///
+/// Shared by the re-pick path (which replaces the row) and the discard path
+/// (which removes it outright). [keepPath] spares one path so a re-save that
+/// re-supplies the same staged file does not delete the bytes it is about to
+/// queue.
+Future<void> _dropQueuedAttachment(
+  Transaction txn,
+  String rowUuid,
+  String fieldname, {
+  String? keepPath,
+}) async {
+  final priorRows = await txn.query(
+    'pending_attachments',
+    columns: ['local_path'],
+    where: 'parent_uuid = ? AND parent_fieldname = ?',
+    whereArgs: [rowUuid, fieldname],
+  );
+  if (priorRows.isEmpty) return;
+  await txn.delete(
+    'pending_attachments',
+    where: 'parent_uuid = ? AND parent_fieldname = ?',
+    whereArgs: [rowUuid, fieldname],
+  );
+  for (final r in priorRows) {
+    final prior = r['local_path'] as String?;
+    if (prior != null && prior.isNotEmpty && prior != keepPath) {
+      await MediaStore.deleteOutboxCopy(prior);
+    }
   }
 }

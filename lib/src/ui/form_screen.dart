@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:uuid/uuid.dart';
 
 import '../api/client.dart';
 import '../api/exceptions.dart';
@@ -12,12 +15,18 @@ import '../models/outbox_row.dart';
 import '../models/workflow_transition.dart';
 import '../services/link_option_service.dart';
 import '../services/meta_service.dart';
+import '../models/image_pick_source.dart';
+import '../services/media_resolver.dart';
+import '../services/location_readiness.dart';
+import '../services/mobile_creation_capture.dart';
 import '../services/offline_repository.dart';
 import '../services/sync_controller.dart';
 import '../services/sync_service.dart';
 import '../services/workflow_service.dart';
+import '../utils/mobile_creation_stamp.dart';
 import '../utils/uuid_pattern.dart';
 import 'widgets/screen_helpers.dart';
+import 'widgets/location_required_barrier.dart';
 import 'widgets/sync_error_banner.dart';
 import 'widgets/form_builder.dart'
     show
@@ -29,9 +38,74 @@ import 'widgets/form_builder.dart'
         FormValidator;
 import 'form/form_controller.dart' show FormController;
 import 'widgets/fields/field_factory.dart' show FieldFactory;
+import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
 
 /// Visual customization for [FormScreen] action area.
+/// Bound on the connect/headers phase of a media fetch.
+const Duration _mediaFetchConnectTimeout = Duration(seconds: 30);
+
+/// Bound on the gap between two body chunks of a media fetch.
+///
+/// Deliberately per-chunk rather than a total deadline: a 25 MB attachment over
+/// a slow rural link is legitimate and must be allowed to finish, while a
+/// connection that goes silent mid-body must not hang the resolve forever.
+const Duration _mediaFetchStallTimeout = Duration(seconds: 30);
+
+/// Accumulates [res]'s body, refusing anything over [cap] and giving up if the
+/// stream goes quiet for [stallTimeout]. Returns null on refusal or stall.
+///
+/// Extracted from `FormScreen._fetchMediaBytes` so the guard rails are testable
+/// without standing up a whole screen: the method builds its own `http.Client`,
+/// which leaves no seam for a hung-server test. [label] appears only in logs.
+///
+/// Two ceilings, because they catch different things: `Content-Length` refuses
+/// an oversized body before a single chunk is read, and the accumulate loop
+/// re-checks as it goes, because a chunked response declares no length and a
+/// server may under-report.
+///
+/// The stall bound is per-CHUNK, not a total deadline. A legitimately slow
+/// 25 MB download on a rural link must be allowed to finish; a connection that
+/// dies mid-body must not hang forever. The caller's `send` timeout covers only
+/// the connect/headers phase — once the response object exists it is satisfied,
+/// so before this bound a stalled stream left the resolve future permanently
+/// unresolved and the widget stuck on a spinner. `AttachField`'s own downloader
+/// already guarded this the same way (`_AttachViewButtonState.stallTimeout`).
+@visibleForTesting
+Future<List<int>?> readCappedMediaBody(
+  http.StreamedResponse res, {
+  required int cap,
+  String label = '',
+  Duration stallTimeout = _mediaFetchStallTimeout,
+}) async {
+  final declared = res.contentLength;
+  if (declared != null && declared > cap) {
+    sdkLog(
+      'readCappedMediaBody($label): Content-Length $declared exceeds the '
+      '$cap byte cap — not fetched',
+    );
+    return null;
+  }
+
+  final bytes = <int>[];
+  try {
+    await for (final chunk in res.stream.timeout(stallTimeout)) {
+      bytes.addAll(chunk);
+      if (bytes.length > cap) {
+        sdkLog(
+          'readCappedMediaBody($label): body exceeded the $cap byte cap '
+          'mid-stream — aborted',
+        );
+        return null;
+      }
+    }
+  } on TimeoutException catch (e) {
+    sdkLog('readCappedMediaBody($label): stalled mid-body — $e');
+    return null;
+  }
+  return bytes;
+}
+
 class FormScreenStyle {
   final Color? appBarBackgroundColor;
   final ButtonStyle? saveButtonStyle;
@@ -58,7 +132,17 @@ class FormScreen extends StatefulWidget {
   final FrappeClient? api;
   final Function()? onSaveSuccess;
 
-  /// When set, new documents created from this screen will include mobile_uuid on the server.
+  /// DEVICE identity callback — one value per install.
+  ///
+  /// No longer used to fill `mobile_uuid`, which is per-DOCUMENT; doing so
+  /// stamped every document created on a device with one value. Kept so
+  /// existing hosts still compile, and because device identity is a
+  /// legitimate thing to pass — it is simply not this field.
+  @Deprecated(
+    'Not used for mobile_uuid: that is per-document identity, this is '
+    'per-install. Remove the argument; FormScreen mints a document uuid '
+    'itself. Will be removed in the next major.',
+  )
   final Future<String?> Function()? getMobileUuid;
 
   /// Optional form style (overrides the default style used by FrappeFormBuilder).
@@ -76,6 +160,15 @@ class FormScreen extends StatefulWidget {
 
   /// Optional pre-filled data for new documents (overrides document?.data when document is null).
   final Map<String, dynamic>? initialData;
+
+  /// Captures `mobile_created_at` / `mobile_latitude_longitude` when a NEW
+  /// record is started — see [MobileCreationCapture]. Defaults to a real
+  /// capture, which reads GPS and so requests location permission the moment a
+  /// new-record form opens. Inject a custom instance to control the clock or
+  /// the location source (tests do), and note that the values are written only
+  /// when the DocType actually declares those fields, so a server without
+  /// `mobile_control` is unaffected either way.
+  final MobileCreationCapture? creationCapture;
 
   /// Optional callback when a Button field is pressed. Override to implement client-script logic
   /// (API calls, dialogs, form updates). When null, default behavior applies: if [field.options]
@@ -143,6 +236,18 @@ class FormScreen extends StatefulWidget {
   /// supply an app-specific [FieldFactory] subclass to override field types.
   final FieldFactory? customFieldFactory;
 
+  /// Synchronous last-known connectivity, forwarded to Attach/Image fields.
+  /// When it returns false, an offline pick is stored as a durable local path
+  /// and queued at save instead of being uploaded inline. When null, fields
+  /// attempt the upload and fall back to the local path if it fails — so
+  /// correctness holds even if the host does not supply this.
+  final bool Function()? isOnline;
+
+  /// Host hook choosing which sources image fields offer — gallery, camera, or
+  /// both. Global across doctypes and fields, and read live so a host can flip
+  /// it from a setting without rebuilding. Null means both.
+  final ImagePickSource Function()? imagePickSource;
+
   const FormScreen({
     super.key,
     required this.meta,
@@ -160,6 +265,7 @@ class FormScreen extends StatefulWidget {
     this.canDelete,
     this.translate,
     this.initialData,
+    this.creationCapture,
     this.onButtonPressed,
     this.onFieldChange,
     this.validator,
@@ -178,6 +284,8 @@ class FormScreen extends StatefulWidget {
     this.controller,
     this.onControllerReady,
     this.customFieldFactory,
+    this.isOnline,
+    this.imagePickSource,
   });
 
   @override
@@ -189,6 +297,67 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   String? _errorMessage;
   void Function()? _triggerSubmit;
 
+  /// This form's DOCUMENT identity, minted once and stable for the life of the
+  /// screen — including across every failed save and retry the operator makes.
+  ///
+  /// That stability is the entire point. It is the same property the offline
+  /// path gets for free: there, `mobile_uuid` is minted into the local row and
+  /// IS its primary key, so every push retry carries the same value and the
+  /// server's unique index rejects the twin. Offline has never duplicated
+  /// because of this, not because that path is more careful. A uuid minted per
+  /// ATTEMPT would restore the duplicate exactly.
+  ///
+  /// Deliberately NOT `FrappeSDK.getMobileUuid()`, which this screen used to
+  /// call here. That returns the DEVICE identity — one value per install, read
+  /// once from secure storage and memoised — so it stamped every document
+  /// created on a device with the same `mobile_uuid`. `mobile_uuid` carries a
+  /// UNIQUE index on most doctypes, which makes the second online create from
+  /// an install a duplicate-key failure; on a site without the index it instead
+  /// makes every document claim one identity, which also defeats the pull
+  /// path's uuid adoption. The two meanings share a name and are not
+  /// interchangeable: device identity answers "which install", document
+  /// identity answers "which document".
+  String _newDocumentMobileUuid = const Uuid().v4();
+
+  /// Ends the current new-document identity and starts a fresh one.
+  ///
+  /// A SUCCESSFUL create ends the document; this screen does not end with it.
+  /// Neither save branch pops — both set the baseline, clear the dirty flag,
+  /// say "Saved successfully" and leave the form up, populated and editable,
+  /// with `widget.document` still null because nothing swaps it. So the next
+  /// Save from the same screen is a NEW record, and must not reuse the key of
+  /// the one already written.
+  ///
+  /// Reusing it was worse than a duplicate: the pre-flight lookup would find
+  /// the first document and return it, `applyServerDocument` would then write
+  /// the SECOND record's values into the FIRST record's local row, and the
+  /// screen would report success — leaving the local cache and the server
+  /// disagreeing until the next pull silently discarded the operator's work.
+  /// Offline had the same shape without the guard, because the uuid IS the
+  /// local row's primary key there.
+  ///
+  /// "Stable across retries" means stable across retries OF ONE DOCUMENT. That
+  /// is the whole contract, and a completed create is where one document stops.
+  void _startNewDocumentIdentity() {
+    _newDocumentMobileUuid = const Uuid().v4();
+  }
+
+  /// The `mobile_uuid` this save must carry.
+  ///
+  /// An existing record is locked to its `localId`: that is system-owned
+  /// metadata, and letting a form payload override it forks lineage, stranding
+  /// the original `docs__` row and its outbox entry.
+  String get _documentMobileUuid =>
+      widget.document?.localId ?? _newDocumentMobileUuid;
+
+  /// Test seam for the identity rule B1 turns on. Exposed because the rule is
+  /// only meaningful as the REAL screen applies it: a test that re-implements
+  /// the rule passes whether or not this screen still calls it, which is how
+  /// the first regression guard came to pin a replica of the fix instead of
+  /// the fix.
+  @visibleForTesting
+  String get documentMobileUuidForTesting => _documentMobileUuid;
+
   List<WorkflowTransition>? _workflowTransitions;
   bool _workflowLoading = false;
   Map<String, dynamic>? _workflowUpdatedDocData;
@@ -199,6 +368,91 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   /// repo in [initState] / [didUpdateWidget] and refreshed on lifecycle
   /// resume + after a Retry tap so the banner reflects the latest state.
   List<OutboxRow> _syncErrorRows = const [];
+
+  /// `pending_attachments.id` → durable local path for this document, so
+  /// Attach/Image fields can preview a `pending:<id>` value (offline pick not
+  /// yet uploaded) from its local copy. Reloaded wherever the document
+  /// (re)loads — initState / didUpdateWidget / resume / after save — so it
+  /// never goes stale against the field markers.
+  Map<int, String> _pendingAttachmentPaths = const {};
+
+  /// Resolves an attach-field value to a local file for preview. Built once per
+  /// screen so the memoised futures inside the field widgets stay stable across
+  /// rebuilds. Null when there is no API client to fetch through — the fields
+  /// then fall back to their previous network-only behaviour.
+  MediaResolver? _mediaResolver;
+
+  /// Fetches the bytes behind a stored attach value, with auth. Returns null on
+  /// any failure: a media fetch must never break form rendering.
+  ///
+  /// STREAMED rather than buffered, and bounded twice, because this is the only
+  /// place that sees the response before it occupies memory:
+  ///
+  /// 1. `Content-Length`, when the server sends one, refuses an oversized body
+  ///    without reading a single chunk.
+  /// 2. The accumulate loop re-checks as it goes, because a chunked response has
+  ///    no declared length and a server may under-report.
+  ///
+  /// [MediaResolver.maxFetchBytes] repeats the ceiling, but by the time it runs
+  /// the allocation has already happened — its job is to keep an oversized body
+  /// out of the cache, not out of RAM. The device floor here is API 26, where a
+  /// single unbounded attachment can take the process down.
+  Future<List<int>?> _fetchMediaBytes(String value) async {
+    final api = widget.api;
+    if (api == null) return null;
+    final url = frappeFileFetchUrl(value, api.baseUrl);
+    if (url == null || !url.startsWith('http')) return null;
+    const cap = kDefaultMaxMediaFetchBytes;
+    http.Client? client;
+    try {
+      client = http.Client();
+      final request = http.Request('GET', Uri.parse(url))
+        ..headers.addAll(api.requestHeaders);
+      final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+
+      return readCappedMediaBody(res, cap: cap, label: value);
+    } catch (e, st) {
+      sdkLog('FormScreen._fetchMediaBytes($value) failed — $e\n$st');
+      return null;
+    } finally {
+      client?.close();
+    }
+  }
+
+  void _buildMediaResolver() {
+    if (widget.api == null) {
+      _mediaResolver = null;
+      return;
+    }
+    _mediaResolver = widget.repository.mediaResolver(
+      fetch: _fetchMediaBytes,
+      isOnline: () => widget.isOnline?.call() ?? true,
+    );
+  }
+
+  /// Mobile creation metadata for a brand-new record: the moment the user
+  /// asked for it, plus the in-flight location read started at that moment.
+  ///
+  /// Non-null ONLY for a new record (`widget.document == null` at init). That
+  /// is what makes an edit-save incapable of re-stamping: [_handleSubmit] has
+  /// nothing to write, so whatever the local row already holds survives.
+  PendingCreationMeta? _creationMeta;
+
+  /// The capture used for this form's parent record AND handed to child tables
+  /// so a new child row gets its own stamps. Resolved once so both share one
+  /// instance. Constructing it reads nothing — GPS is touched only by `begin()`,
+  /// and both call sites gate that on the relevant meta declaring the fields.
+  late final MobileCreationCapture _capture =
+      widget.creationCapture ?? MobileCreationCapture();
+
+  /// Non-null while a new record is BLOCKED because the device cannot locate
+  /// it. Drives [LocationRequiredBarrier] over the form body.
+  LocationReadiness? _locationBlock;
+
+  /// True while an OS prompt / settings hop is in flight, so the barrier's
+  /// button cannot be double-fired.
+  bool _locationBusy = false;
 
   /// Baseline form data for dirty check. When current form data differs, show Save.
   Map<String, dynamic>? _baselineFormData;
@@ -281,10 +535,15 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _workflowService = widget.api != null ? WorkflowService(widget.api!) : null;
+    _buildMediaResolver();
     _baselineFormData = Map<String, dynamic>.from(_currentDocData);
     _loadWorkflowTransitions();
     _loadSyncErrors();
+    _loadPendingAttachmentPaths();
     widget.onFormDirtyChanged?.call(false);
+    // Fire-and-forget: readiness is async, and the form must build now. The
+    // barrier appears a frame later if the device cannot locate the record.
+    _evaluateLocationGate();
 
     if (widget.mode == FormBuilderMode.reactive) {
       _formController =
@@ -344,17 +603,30 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     final route = _route;
     if (route != null && !route.isCurrent) return;
     _loadSyncErrors();
+    _loadPendingAttachmentPaths();
+    // The user may have granted the permission or switched location on while
+    // they were away in Settings; this is the only signal that they are back.
+    _evaluateLocationGate();
   }
 
   @override
   void didUpdateWidget(covariant FormScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // A host reusing this screen for "save and add another" hands over a null
+    // document after a populated one. That is a NEW record, so it needs a new
+    // identity — otherwise the next create carries the previous document's key
+    // and resolves to it. Mirrors the realignment this screen already does on
+    // the same transition for creation metadata, for the same reason.
+    if (oldWidget.document != null && widget.document == null) {
+      _startNewDocumentIdentity();
+    }
     if (oldWidget.document?.serverId != widget.document?.serverId ||
         oldWidget.api != widget.api ||
         oldWidget.document?.data != widget.document?.data ||
         oldWidget.initialData != widget.initialData) {
       _workflowTransitions = null;
       _workflowUpdatedDocData = null;
+      _buildMediaResolver();
       _workflowService = widget.api != null
           ? WorkflowService(widget.api!)
           : null;
@@ -363,6 +635,24 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       widget.onFormDirtyChanged?.call(false);
       _loadWorkflowTransitions();
       _loadSyncErrors();
+      _loadPendingAttachmentPaths();
+      // Keep the creation capture aligned with which record this screen now
+      // shows. A host that reuses one FormScreen element can swap either way,
+      // and both directions are wrong if the capture is left alone:
+      //   doc -> null ("save and add another"): the new record would get no
+      //     stamps at all, because initState already ran for the edit.
+      //   null -> doc (host resolves the document asynchronously): the capture
+      //     from the new-record open would stamp an EXISTING record, filling a
+      //     blank `mobile_created_at` on an old Desk-created row with today's
+      //     date. That writes wrong data, not merely missing data.
+      // `_beginCreationCaptureIfNew` is idempotent, so an unrelated rebuild in
+      // the same new-record session keeps the original start time.
+      if (widget.document != null) {
+        _creationMeta = null;
+        if (_locationBlock != null) _locationBlock = null;
+      } else {
+        _evaluateLocationGate();
+      }
     }
   }
 
@@ -385,6 +675,42 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       // Banner is best-effort; a query failure should never block the
       // form from rendering.
       sdkLog('FormScreen: _loadSyncErrors failed — $e\n$st');
+    }
+  }
+
+  Future<void> _loadPendingAttachmentPaths() async {
+    final localId = widget.document?.localId;
+    if (localId == null || localId.isEmpty) {
+      if (_pendingAttachmentPaths.isNotEmpty && mounted) {
+        setState(() => _pendingAttachmentPaths = const {});
+      }
+      return;
+    }
+    // Skip the DB round-trip for forms that can hold no attachment — either
+    // directly (Attach/Attach Image/Image) or inside a child table. Avoids a
+    // needless query (and any pending markers) on plain forms.
+    final canHoldAttachment = widget.meta.fields.any((f) {
+      final t = f.fieldtype;
+      return t == 'Attach' ||
+          t == 'Attach Image' ||
+          t == 'Image' ||
+          t == 'Table' ||
+          t == 'Table MultiSelect';
+    });
+    if (!canHoldAttachment) {
+      if (_pendingAttachmentPaths.isNotEmpty && mounted) {
+        setState(() => _pendingAttachmentPaths = const {});
+      }
+      return;
+    }
+    try {
+      final map = await widget.repository.pendingAttachmentLocalPaths(localId);
+      if (!mounted) return;
+      setState(() => _pendingAttachmentPaths = map);
+    } catch (e, st) {
+      // Preview resolution is best-effort; a lookup failure just falls back to
+      // the broken-image placeholder — never blocks the form.
+      sdkLog('FormScreen: _loadPendingAttachmentPaths failed — $e\n$st');
     }
   }
 
@@ -663,6 +989,118 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     return null;
   }
 
+  /// Starts creation capture for a brand-new record. A no-op for an edit — an
+  /// existing record was already stamped when it was first created.
+  ///
+  /// Runs at form open rather than at save so `mobile_created_at` records when
+  /// the user *started* the record; stamping at save would make it a duplicate
+  /// of Frappe's own `creation`. The location read is not awaited: it needs a
+  /// permission grant and a fix, and the form must be usable immediately.
+  void _beginCreationCaptureIfNew() {
+    if (!_creationCaptureApplies) return;
+    if (_creationMeta != null) return;
+    _creationMeta = _capture.begin();
+  }
+
+  /// True when this screen should capture creation metadata at all: a NEW
+  /// record, on a DocType that declares the fields.
+  ///
+  /// The DocType gate is what keeps every other form untouched. Without it,
+  /// opening ANY new-record form would demand location — and block on it —
+  /// even though the doctype has nowhere to store the result, which is every
+  /// doctype on a server without `mobile_control`.
+  bool get _creationCaptureApplies =>
+      widget.document == null && declaresCreationMeta(widget.meta);
+
+  /// Re-reads device readiness and either clears the block and starts the
+  /// capture, or raises the barrier.
+  ///
+  /// The capture is started only once the device is actually capable of a fix.
+  /// Starting it earlier would burn the read against a denied permission and
+  /// then save an empty location even after the user granted it — which is the
+  /// whole failure this gate exists to prevent.
+  Future<void> _evaluateLocationGate() async {
+    if (!_creationCaptureApplies) return;
+    final readiness = await _capture.readiness();
+    if (!mounted) return;
+    if (isLocationReady(readiness)) {
+      if (_locationBlock != null) setState(() => _locationBlock = null);
+      _beginCreationCaptureIfNew();
+      return;
+    }
+    // A known-blocked permission is sticky until it actually becomes ready.
+    // Same Android 8 quirk as in [_requestLocationPermission]: a plain check
+    // reports `denied` even when the OS has stopped asking, so letting a check
+    // overwrite `permissionBlocked` would demote the barrier back to an
+    // "Allow location" button that cannot work.
+    if (_locationBlock == LocationReadiness.permissionBlocked &&
+        readiness == LocationReadiness.permissionDenied) {
+      return;
+    }
+    setState(() => _locationBlock = readiness);
+  }
+
+  /// Barrier action for an askable denial: show the OS dialog, then apply what
+  /// the REQUEST reported.
+  ///
+  /// The request's own result is used rather than a fresh `checkPermission()`,
+  /// and that is load-bearing rather than a shortcut. Verified on an Android 8
+  /// device: after "Don't ask again" the permission flags are `USER_FIXED` and
+  /// the OS never prompts again, yet `checkPermission()` still answers plain
+  /// `denied` — only the request comes back `deniedForever`. Re-deriving
+  /// readiness from a check therefore lost the one fact worth knowing and left
+  /// the barrier looping on "Allow location", a button the OS had already
+  /// decided to ignore.
+  Future<void> _requestLocationPermission() async {
+    setState(() => _locationBusy = true);
+    LocationReadiness result;
+    try {
+      result = await _capture.requestPermission();
+    } finally {
+      if (mounted) setState(() => _locationBusy = false);
+    }
+    if (!mounted) return;
+    if (isLocationReady(result)) {
+      setState(() => _locationBlock = null);
+      _beginCreationCaptureIfNew();
+      return;
+    }
+    setState(() => _locationBlock = result);
+  }
+
+  /// Barrier action for a blocked permission / disabled service. Nothing is
+  /// awaited beyond the hop itself — the user changes the setting outside the
+  /// app, and `didChangeAppLifecycleState` re-evaluates when they come back.
+  Future<void> _openLocationSettings({required bool appSettings}) async {
+    setState(() => _locationBusy = true);
+    try {
+      if (appSettings) {
+        await openLocationAppSettings();
+      } else {
+        await openDeviceLocationSettings();
+      }
+    } finally {
+      if (mounted) setState(() => _locationBusy = false);
+    }
+  }
+
+  /// Merges the creation stamps into [payload]. Waits briefly for a location
+  /// read that has not landed yet — see [kCreationLocationSaveWait] for why the
+  /// wait is short. No-op when this is an edit, when the doctype does not
+  /// declare the fields, or when the payload already carries values.
+  Future<Map<String, dynamic>> _withCreationMeta(
+    Map<String, dynamic> payload,
+  ) async {
+    final meta = _creationMeta;
+    if (meta == null) return payload;
+    return stampCreationMeta(
+      meta: widget.meta,
+      data: payload,
+      createdAt: formatFrappeDatetime(meta.startedAt),
+      latitudeLongitude: await meta.location(),
+    );
+  }
+
   Future<void> _handleSubmit(Map<String, dynamic> formData) async {
     // Local-first validation: DB-independent rules run on-device so the user
     // sees errors at save-time rather than at sync-time. Returns null on pass;
@@ -690,7 +1128,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     // Normalize multi-select: Frappe expects comma-separated string for plain
     // multi-select fields, but Table / Table MultiSelect fields must remain as
     // List<Map> so Frappe can create child-table rows.
-    final payload = Map<String, dynamic>.from(formData);
+    var payload = Map<String, dynamic>.from(formData);
     for (final f in widget.meta.fields) {
       final name = f.fieldname;
       if (f.allowMultiple && name != null && payload[name] is List) {
@@ -706,6 +1144,19 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     setState(() {
       _errorMessage = null;
     });
+
+    // Stamp the mobile creation metadata captured when this record was
+    // started. Deliberately AFTER _setSaving(true): this may wait briefly on a
+    // GPS fix, and the user should see the saving indicator while it does.
+    // Deliberately BEFORE the four save branches below (server-first
+    // insert/update, offline insert/update), each of which reads `payload`.
+    // Deliberately AFTER `widget.validator`, so a host validator never has to
+    // know about system metadata it did not put there.
+    payload = await _withCreationMeta(payload);
+    if (!mounted) {
+      _setSaving(false);
+      return;
+    }
 
     // Offline-first contract: every save queues to docs__ + outbox;
     // push is driven by the cloud icon / Sync. Server-first below
@@ -737,6 +1188,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         // reconcileServerSave path that collapses any failed outbox
         // rows for this same lineage.
         final isEditingExistingDoc = widget.document != null;
+        // Hoisted so the post-save block below can tell a create that returned
+        // a usable name from one that did not. See the re-mint guard there.
+        String? createdServerName;
         if (isInsert) {
           // Preserve any existing offline data + mobile_uuid from the local doc.
           if (widget.document != null) {
@@ -746,32 +1200,26 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
               ..clear()
               ..addAll(existing);
           }
-          if (widget.getMobileUuid != null &&
-              (payload['mobile_uuid'] == null ||
-                  (payload['mobile_uuid'] as String).isEmpty)) {
-            final uuid = await widget.getMobileUuid!();
-            if (uuid != null && uuid.isNotEmpty) {
-              payload['mobile_uuid'] = uuid;
-            }
-          }
-          // Identity lock: when this is an edit-save of an existing
-          // local record, the mobile_uuid is system-owned metadata
-          // and MUST equal the document's localId. The form payload
-          // and the device-level getMobileUuid callback are both
-          // untrusted for this field — a stray empty string from
-          // either would otherwise fork lineage (the server generates
-          // a fresh UUID, leaving the original docs__ row + failed
-          // outbox row orphaned). See `reconcileServerSave` for the
-          // companion cleanup that runs after the server replies.
-          if (isEditingExistingDoc) {
-            payload['mobile_uuid'] = widget.document!.localId;
-          }
+          // Identity is decided HERE, not by the form payload, and the same way
+          // for a new document as for an edit-save: an existing record is
+          // locked to its `localId` (system-owned metadata — letting a payload
+          // override it forks lineage, stranding the original docs__ row and
+          // its outbox entry; see `reconcileServerSave` for the companion
+          // cleanup), and a new one carries this screen's own document uuid,
+          // which is stable across every retry the operator makes.
+          //
+          // Written unconditionally so a stray null or empty string in the
+          // payload cannot survive: `mobile_uuid = ''` is worse than absent,
+          // because MariaDB permits many NULLs in a unique index but only one
+          // empty string.
+          payload['mobile_uuid'] = _documentMobileUuid;
           final result = await widget.api!.document.createDocument(
             widget.meta.name,
             payload,
           );
           final serverName =
               result['name']?.toString() ?? result['docname']?.toString();
+          createdServerName = serverName;
           if (serverName != null) {
             final merged = Map<String, dynamic>.from(payload)
               ..['name'] = serverName;
@@ -837,6 +1285,18 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           setState(() {
             _baselineFormData = savedData!;
           });
+          // The created document is finished; the screen is not. See
+          // [_startNewDocumentIdentity].
+          //
+          // `serverName != null` is load-bearing. This block is reached on both
+          // paths, and when the create came back with no usable name the POST
+          // may still have committed — the ambiguous case. Re-minting there
+          // would make a retry write a SECOND document instead of resolving to
+          // the first, so the identity is kept: of the two wrong answers, the
+          // one that can still be reconciled by `mobile_uuid` is the safer.
+          if (widget.document == null && createdServerName != null) {
+            _startNewDocumentIdentity();
+          }
           _isFormDirty.value = false;
           showStatusSnackBar(
             context,
@@ -850,12 +1310,13 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
       // Offline / store-then-sync path
       if (widget.document == null) {
-        if (widget.getMobileUuid != null) {
-          final uuid = await widget.getMobileUuid!();
-          if (uuid != null && uuid.isNotEmpty) {
-            payload['mobile_uuid'] = uuid;
-          }
-        }
+        // Same document identity the online branch uses — see
+        // [_newDocumentMobileUuid]. `saveDocument` mints one itself when the
+        // payload carries none, so this is not load-bearing for a first save;
+        // it is here so a record that starts offline and a record that starts
+        // online are identified the same way, and so a retry after a failed
+        // offline save reuses the identity rather than forking a second row.
+        payload['mobile_uuid'] = _documentMobileUuid;
         await widget.repository.saveDocument(
           doctype: widget.meta.name,
           data: payload,
@@ -878,7 +1339,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         setState(() {
           _baselineFormData = savedData;
         });
+        // Same reason as the online branch — and load-bearing here too, since
+        // offline the uuid IS the local row's primary key, so reusing it writes
+        // the next record over the one just saved.
+        if (widget.document == null) _startNewDocumentIdentity();
         _isFormDirty.value = false;
+        // A save may have queued freshly-picked attachments; refresh the
+        // id→local-path map so any `pending:<id>` markers resolve in-place.
+        _loadPendingAttachmentPaths();
         showStatusSnackBar(
           context,
           sdkTr('Document saved successfully'),
@@ -1051,78 +1519,101 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
       ),
       body: Stack(
         children: [
-          Column(
-            children: [
-              if (_syncErrorRows.isNotEmpty)
-                SyncErrorBanner(
-                  rows: _syncErrorRows,
-                  onRetry: widget.syncController == null ? null : _retrySyncRow,
+          // Disabled — not merely covered — while the location gate blocks a
+          // new record, so nothing behind the barrier can be typed into even
+          // if a gesture reached it.
+          AbsorbPointer(
+            key: const Key('form_location_absorber'),
+            absorbing: _locationBlock != null,
+            child: Column(
+              children: [
+                if (_syncErrorRows.isNotEmpty)
+                  SyncErrorBanner(
+                    rows: _syncErrorRows,
+                    onRetry: widget.syncController == null
+                        ? null
+                        : _retrySyncRow,
+                  ),
+                if (_errorMessage != null)
+                  ErrorMessageBanner(message: _errorMessage!),
+                if (widget.meta.hasWorkflow &&
+                    widget.document != null &&
+                    widget.api != null)
+                  _WorkflowHeader(
+                    meta: widget.meta,
+                    documentData: _currentDocData,
+                    loading: _workflowLoading,
+                    translate: widget.translate,
+                    onShowActions: _showWorkflowActionsSheet,
+                    showActions: widget.showWorkflowActions,
+                  ),
+                Expanded(
+                  child: FrappeFormBuilder(
+                    key: widget.document != null
+                        ? ValueKey('form_${widget.document!.localId}')
+                        : const ValueKey('form_new'),
+                    mode: widget.mode,
+                    controller: _formController,
+                    meta: widget.meta,
+                    initialData:
+                        _workflowUpdatedDocData ??
+                        widget.document?.data ??
+                        widget.initialData,
+                    onSubmit: _handleSubmit,
+                    readOnly: effectiveReadOnly,
+                    onFormDataChanged: _onFormDataChanged,
+                    linkOptionService: widget.linkOptionService,
+                    useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                    customFieldFactory: widget.customFieldFactory,
+                    uploadFile: widget.api != null
+                        ? (file) async {
+                            final res = await widget.api!.attachment.uploadFile(
+                              file,
+                            );
+                            return res['file_url'] as String? ??
+                                res['file_name'] as String?;
+                          }
+                        : null,
+                    fileUrlBase: widget.api?.baseUrl,
+                    imageHeaders: widget.api?.requestHeaders,
+                    isOnline: widget.isOnline,
+                    pendingAttachmentPaths: _pendingAttachmentPaths,
+                    mediaResolver: _mediaResolver?.resolve,
+                    // Queue-aware: refuses to delete a staged file a
+                    // `pending_attachments` row still owns. See
+                    // `OfflineRepository.reclaimDiscardedAttachment`.
+                    reclaimAttachment:
+                        widget.repository.reclaimDiscardedAttachment,
+                    // Read live through the repository so a mid-session toggle
+                    // flip takes effect on the next pick.
+                    isOfflineMode: () => widget.repository.offlineMode.enabled,
+                    imagePickSource: widget.imagePickSource,
+                    fetchLinkedDocument: _fetchLinkedDocument,
+                    getMeta: widget.metaService != null
+                        ? (doctype) => widget.metaService!.getMeta(doctype)
+                        : null,
+                    creationCapture: _capture,
+                    registerSubmit: (trigger) {
+                      _triggerSubmit = trigger;
+                      widget.registerSubmit?.call(trigger);
+                    },
+                    onButtonPressed: widget.onButtonPressed != null
+                        ? (field, formData) => widget.onButtonPressed!(
+                            field,
+                            formData,
+                            _handleButtonPressed,
+                          )
+                        : _handleButtonPressed,
+                    style: widget.style,
+                    translate: widget.translate,
+                    onFieldChange: widget.onFieldChange,
+                    getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                    cascadeProgrammaticChanges:
+                        widget.cascadeProgrammaticChanges,
+                  ),
                 ),
-              if (_errorMessage != null)
-                ErrorMessageBanner(message: _errorMessage!),
-              if (widget.meta.hasWorkflow &&
-                  widget.document != null &&
-                  widget.api != null)
-                _WorkflowHeader(
-                  meta: widget.meta,
-                  documentData: _currentDocData,
-                  loading: _workflowLoading,
-                  translate: widget.translate,
-                  onShowActions: _showWorkflowActionsSheet,
-                  showActions: widget.showWorkflowActions,
-                ),
-              Expanded(
-                child: FrappeFormBuilder(
-                  key: widget.document != null
-                      ? ValueKey('form_${widget.document!.localId}')
-                      : const ValueKey('form_new'),
-                  mode: widget.mode,
-                  controller: _formController,
-                  meta: widget.meta,
-                  initialData:
-                      _workflowUpdatedDocData ??
-                      widget.document?.data ??
-                      widget.initialData,
-                  onSubmit: _handleSubmit,
-                  readOnly: effectiveReadOnly,
-                  onFormDataChanged: _onFormDataChanged,
-                  linkOptionService: widget.linkOptionService,
-                  useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
-                  customFieldFactory: widget.customFieldFactory,
-                  uploadFile: widget.api != null
-                      ? (file) async {
-                          final res = await widget.api!.attachment.uploadFile(
-                            file,
-                          );
-                          return res['file_url'] as String? ??
-                              res['file_name'] as String?;
-                        }
-                      : null,
-                  fileUrlBase: widget.api?.baseUrl,
-                  imageHeaders: widget.api?.requestHeaders,
-                  fetchLinkedDocument: _fetchLinkedDocument,
-                  getMeta: widget.metaService != null
-                      ? (doctype) => widget.metaService!.getMeta(doctype)
-                      : null,
-                  registerSubmit: (trigger) {
-                    _triggerSubmit = trigger;
-                    widget.registerSubmit?.call(trigger);
-                  },
-                  onButtonPressed: widget.onButtonPressed != null
-                      ? (field, formData) => widget.onButtonPressed!(
-                          field,
-                          formData,
-                          _handleButtonPressed,
-                        )
-                      : _handleButtonPressed,
-                  style: widget.style,
-                  translate: widget.translate,
-                  onFieldChange: widget.onFieldChange,
-                  getLinkFilterBuilder: widget.getLinkFilterBuilder,
-                  cascadeProgrammaticChanges: widget.cascadeProgrammaticChanges,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
           if (_isSaving)
             Positioned.fill(
@@ -1153,6 +1644,19 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                   ),
                 ),
               ),
+            ),
+          // Last child so it covers the form, the banners and the saving
+          // overlay alike: while the device cannot locate a new record, none of
+          // it may be interacted with. `Back` still pops the route.
+          if (_locationBlock != null)
+            LocationRequiredBarrier(
+              readiness: _locationBlock!,
+              busy: _locationBusy,
+              onGrant: _requestLocationPermission,
+              onOpenAppSettings: () => _openLocationSettings(appSettings: true),
+              onOpenLocationSettings: () =>
+                  _openLocationSettings(appSettings: false),
+              onRecheck: _evaluateLocationGate,
             ),
         ],
       ),

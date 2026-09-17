@@ -8,6 +8,11 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../api/create_idempotency.dart' show OnResolvedExisting;
+import '../database/daos/media_cache_dao.dart';
+import '../database/daos/pending_attachment_dao.dart';
+import '../models/media_store_usage.dart';
+import '../utils/media_store.dart';
 import '../utils/sdk_log.dart';
 import '../api/exceptions.dart';
 import '../concurrency/concurrency_pool.dart';
@@ -216,11 +221,23 @@ class FrappeSDK {
     _modeNotifier?.value = next;
   }
 
+  /// Notified when an online create resolved to a document the server already
+  /// held for this `mobile_uuid`, instead of inserting a second one.
+  ///
+  /// Declared HERE, on the SDK, because this is the only layer a host reaches.
+  /// [AuthService] is constructed inside [_doInitialize] one statement before
+  /// its own `initialize()` reads this, and `sdk.auth` does not exist until
+  /// after that has already handed the value down to [FrappeClient] ->
+  /// `DocumentService`. A hook declared only on [AuthService] is therefore null
+  /// on every production path: there is no moment at which a host could set it.
+  final OnResolvedExisting? onResolvedExisting;
+
   FrappeSDK({
     required this.baseUrl,
     this.databaseAppName,
     this.payloadTransformer,
     this.onFfiInitFailure,
+    this.onResolvedExisting,
     this.pullPageSize = 500,
     this.syncServicePageSize = 1000,
     this.listChildDocsPageSize = 1000,
@@ -248,6 +265,7 @@ class FrappeSDK {
       isPersisted: true,
     ),
     http.Client? httpClient,
+    this.onResolvedExisting,
     this.pullPageSize = 500,
     this.syncServicePageSize = 1000,
     this.listChildDocsPageSize = 1000,
@@ -269,6 +287,7 @@ class FrappeSDK {
     _client = FrappeClient(
       baseUrl,
       httpClient: httpClient,
+      onResolvedExisting: onResolvedExisting,
       listChildDocsPageSize: listChildDocsPageSize,
       listFullDocsPageSize: listFullDocsPageSize,
       listDefaultPageSize: listDefaultPageSize,
@@ -401,6 +420,10 @@ class FrappeSDK {
       restartGapMs: tamperProtectionRestartGapMs,
     );
     _authService = AuthService();
+    // Assigned BEFORE initialize(), which is where AuthService reads it to
+    // build the FrappeClient. Assigning after would leave the hook null on the
+    // client that every DocumentService call actually uses.
+    _authService!.onResolvedExisting = onResolvedExisting;
     _authService!.initialize(baseUrl, database: _database);
 
     // Use the same authenticated client instance everywhere so that
@@ -925,6 +948,14 @@ class FrappeSDK {
       // Wipe the translation SQLite cache and in-memory map so a different
       // user logging in on the same device doesn't see stale translations.
       await _translationService?.clearAll();
+      // Cached and staged media must not outlive the data they belong to. The
+      // DB wipe drops `media_cache` and `pending_attachments`, but the FILES
+      // live outside SQLite, so without this the previous user's private survey
+      // photos stay readable on a shared device after the next sign-in.
+      //
+      // Destructive by design: this also clears `outbox/`, which holds the only
+      // copy of any attachment that never uploaded.
+      await MediaStore.clearAll();
       // In-memory mirrors of the now-dropped DB state. Without these, the
       // next session would short-circuit table-existence checks against a
       // cache that still remembers tables that no longer exist.
@@ -939,6 +970,88 @@ class FrappeSDK {
     // banner so the next login doesn't inherit the previous session's
     // unreachable-server state.
     _syncStateNotifier?.clearLastError();
+  }
+
+  /// On-device attachment media usage: staged bytes, cached bytes, and how much
+  /// [sweepOrphanedMedia] would reclaim right now.
+  ///
+  /// Exists so a host can show usage and offer a manual "Clear cached media"
+  /// control while automatic eviction is still unbuilt (Phase 2).
+  ///
+  /// Read-only. `orphanBytes` is a subset of `outboxBytes` and is excluded from
+  /// `totalBytes`, so a UI can show "1.4 GB — 240 MB reclaimable" without
+  /// double-counting. `viewerTempBytes` IS counted in `totalBytes` — it is real
+  /// occupied space, and was previously invisible to this report because the
+  /// viewer's scratch directory sits outside the media store's root. Returns
+  /// zeros when the SDK is not initialized.
+  Future<MediaStoreUsage> mediaStoreUsage() async {
+    final refs = await _referencedStagedPaths();
+    if (refs == null) {
+      return const MediaStoreUsage(
+        outboxBytes: 0,
+        cacheBytes: 0,
+        orphanBytes: 0,
+        orphanCount: 0,
+      );
+    }
+    return MediaStore.usage(refs);
+  }
+
+  /// Deletes staged attachment files that nothing references, returning the
+  /// bytes reclaimed.
+  ///
+  /// SAFE: a file goes only when no queued attachment references it AND it was
+  /// not staged in this session, so a pick sitting in an open form is never
+  /// touched. Never throws.
+  ///
+  /// Deletes nothing if the referenced-set query fails — an empty result must
+  /// never be mistaken for "everything is an orphan".
+  Future<int> sweepOrphanedMedia() async {
+    final refs = await _referencedStagedPaths();
+    if (refs == null) return 0;
+    return MediaStore.sweepOrphans(refs);
+  }
+
+  /// Paths referenced by queued attachments, or NULL when the query failed.
+  ///
+  /// The null is load-bearing: callers must not treat it as an empty set, which
+  /// would classify every staged file as reclaimable.
+  Future<Set<String>?> _referencedStagedPaths() async {
+    final db = _database;
+    if (db == null) return null;
+    try {
+      return await PendingAttachmentDao(db.rawDatabase).referencedLocalPaths();
+    } catch (e, st) {
+      sdkLog(
+        'FrappeSDK: referenced-path query failed, skipping reclaim — $e\n$st',
+      );
+      return null;
+    }
+  }
+
+  /// Clears the on-device media CACHE: the `cache/` directory, its index, and
+  /// the viewer's scratch directory (attachments downloaded so an external app
+  /// could open them).
+  ///
+  /// SAFE. It never touches `outbox/` or `pending_attachments`, so an
+  /// attachment that has not uploaded yet cannot be lost — everything cleared
+  /// here is a performance copy of server media and is always re-fetchable.
+  /// This is the method to wire to a host-facing "Clear cached media" control,
+  /// and it reclaims every byte `MediaStoreUsage.totalBytes` attributes to
+  /// cache — including `viewerTempBytes`, which no clearing path reached until
+  /// this release.
+  ///
+  /// Only `logout(clearDatabase: true)` clears `outbox/`, where losing staged
+  /// files is the intended security behaviour.
+  Future<void> clearMediaCache() async {
+    await MediaStore.clearCache();
+    final db = _database;
+    if (db == null) return;
+    try {
+      await MediaCacheDao(db.rawDatabase).deleteAll();
+    } catch (e, st) {
+      sdkLog('FrappeSDK.clearMediaCache: index clear failed — $e\n$st');
+    }
   }
 
   /// Throws if [initialize] hasn't run. Called as the first line of every
