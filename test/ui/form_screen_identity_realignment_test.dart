@@ -56,11 +56,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: FormScreen(
-            meta: _meta(),
-            repository: repo,
-            document: document,
-          ),
+          body: FormScreen(meta: _meta(), repository: repo, document: document),
         ),
       ),
     );
