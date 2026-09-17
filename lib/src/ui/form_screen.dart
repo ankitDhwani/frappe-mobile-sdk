@@ -1003,6 +1003,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         // reconcileServerSave path that collapses any failed outbox
         // rows for this same lineage.
         final isEditingExistingDoc = widget.document != null;
+        // Hoisted so the post-save block below can tell a create that returned
+        // a usable name from one that did not. See the re-mint guard there.
+        String? createdServerName;
         if (isInsert) {
           // Preserve any existing offline data + mobile_uuid from the local doc.
           if (widget.document != null) {
@@ -1031,6 +1034,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           );
           final serverName =
               result['name']?.toString() ?? result['docname']?.toString();
+          createdServerName = serverName;
           if (serverName != null) {
             final merged = Map<String, dynamic>.from(payload)
               ..['name'] = serverName;
@@ -1098,7 +1102,16 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           });
           // The created document is finished; the screen is not. See
           // [_startNewDocumentIdentity].
-          if (widget.document == null) _startNewDocumentIdentity();
+          //
+          // `serverName != null` is load-bearing. This block is reached on both
+          // paths, and when the create came back with no usable name the POST
+          // may still have committed — the ambiguous case. Re-minting there
+          // would make a retry write a SECOND document instead of resolving to
+          // the first, so the identity is kept: of the two wrong answers, the
+          // one that can still be reconciled by `mobile_uuid` is the safer.
+          if (widget.document == null && createdServerName != null) {
+            _startNewDocumentIdentity();
+          }
           _isFormDirty.value = false;
           showStatusSnackBar(
             context,

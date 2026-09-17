@@ -27,7 +27,13 @@ const int kMaxRememberedAttempts = 512;
 ///   and the first one was already committed.
 /// * 5xx — the server was reached. A gateway timeout in particular is routinely
 ///   returned for a request that is still running and goes on to commit.
-/// * **409 IS ambiguous — in fact it is positive proof the write landed.** Frappe
+/// * **409 is ambiguous, and on THIS doctype's unique key it is proof the write
+///   landed.** The distinction matters: a 409 raised by some *other* unique
+///   constraint — a naming-series collision, a unique `item_code` — says
+///   nothing about whether this document was written. The behaviour is correct
+///   either way, because what follows is a lookup by `mobile_uuid`: it finds
+///   the twin and resolves, or finds nothing and rethrows after one fast-fail
+///   round trip. Only the claim needed narrowing. Frappe
 ///   raises `DuplicateEntryError` / `UniqueValidationError` with
 ///   `http_status_code = 409`, which on a doctype where `mobile_uuid` carries
 ///   its unique index is MariaDB rejecting the twin: an EARLIER attempt created
