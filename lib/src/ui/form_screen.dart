@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:uuid/uuid.dart';
 
 import '../api/client.dart';
 import '../api/exceptions.dart';
@@ -131,7 +132,17 @@ class FormScreen extends StatefulWidget {
   final FrappeClient? api;
   final Function()? onSaveSuccess;
 
-  /// When set, new documents created from this screen will include mobile_uuid on the server.
+  /// DEVICE identity callback — one value per install.
+  ///
+  /// No longer used to fill `mobile_uuid`, which is per-DOCUMENT; doing so
+  /// stamped every document created on a device with one value. Kept so
+  /// existing hosts still compile, and because device identity is a
+  /// legitimate thing to pass — it is simply not this field.
+  @Deprecated(
+    'Not used for mobile_uuid: that is per-document identity, this is '
+    'per-install. Remove the argument; FormScreen mints a document uuid '
+    'itself. Will be removed in the next major.',
+  )
   final Future<String?> Function()? getMobileUuid;
 
   /// Optional form style (overrides the default style used by FrappeFormBuilder).
@@ -285,6 +296,67 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   bool _isSaving = false;
   String? _errorMessage;
   void Function()? _triggerSubmit;
+
+  /// This form's DOCUMENT identity, minted once and stable for the life of the
+  /// screen — including across every failed save and retry the operator makes.
+  ///
+  /// That stability is the entire point. It is the same property the offline
+  /// path gets for free: there, `mobile_uuid` is minted into the local row and
+  /// IS its primary key, so every push retry carries the same value and the
+  /// server's unique index rejects the twin. Offline has never duplicated
+  /// because of this, not because that path is more careful. A uuid minted per
+  /// ATTEMPT would restore the duplicate exactly.
+  ///
+  /// Deliberately NOT `FrappeSDK.getMobileUuid()`, which this screen used to
+  /// call here. That returns the DEVICE identity — one value per install, read
+  /// once from secure storage and memoised — so it stamped every document
+  /// created on a device with the same `mobile_uuid`. `mobile_uuid` carries a
+  /// UNIQUE index on most doctypes, which makes the second online create from
+  /// an install a duplicate-key failure; on a site without the index it instead
+  /// makes every document claim one identity, which also defeats the pull
+  /// path's uuid adoption. The two meanings share a name and are not
+  /// interchangeable: device identity answers "which install", document
+  /// identity answers "which document".
+  String _newDocumentMobileUuid = const Uuid().v4();
+
+  /// Ends the current new-document identity and starts a fresh one.
+  ///
+  /// A SUCCESSFUL create ends the document; this screen does not end with it.
+  /// Neither save branch pops — both set the baseline, clear the dirty flag,
+  /// say "Saved successfully" and leave the form up, populated and editable,
+  /// with `widget.document` still null because nothing swaps it. So the next
+  /// Save from the same screen is a NEW record, and must not reuse the key of
+  /// the one already written.
+  ///
+  /// Reusing it was worse than a duplicate: the pre-flight lookup would find
+  /// the first document and return it, `applyServerDocument` would then write
+  /// the SECOND record's values into the FIRST record's local row, and the
+  /// screen would report success — leaving the local cache and the server
+  /// disagreeing until the next pull silently discarded the operator's work.
+  /// Offline had the same shape without the guard, because the uuid IS the
+  /// local row's primary key there.
+  ///
+  /// "Stable across retries" means stable across retries OF ONE DOCUMENT. That
+  /// is the whole contract, and a completed create is where one document stops.
+  void _startNewDocumentIdentity() {
+    _newDocumentMobileUuid = const Uuid().v4();
+  }
+
+  /// The `mobile_uuid` this save must carry.
+  ///
+  /// An existing record is locked to its `localId`: that is system-owned
+  /// metadata, and letting a form payload override it forks lineage, stranding
+  /// the original `docs__` row and its outbox entry.
+  String get _documentMobileUuid =>
+      widget.document?.localId ?? _newDocumentMobileUuid;
+
+  /// Test seam for the identity rule B1 turns on. Exposed because the rule is
+  /// only meaningful as the REAL screen applies it: a test that re-implements
+  /// the rule passes whether or not this screen still calls it, which is how
+  /// the first regression guard came to pin a replica of the fix instead of
+  /// the fix.
+  @visibleForTesting
+  String get documentMobileUuidForTesting => _documentMobileUuid;
 
   List<WorkflowTransition>? _workflowTransitions;
   bool _workflowLoading = false;
@@ -540,6 +612,14 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(covariant FormScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // A host reusing this screen for "save and add another" hands over a null
+    // document after a populated one. That is a NEW record, so it needs a new
+    // identity — otherwise the next create carries the previous document's key
+    // and resolves to it. Mirrors the realignment this screen already does on
+    // the same transition for creation metadata, for the same reason.
+    if (oldWidget.document != null && widget.document == null) {
+      _startNewDocumentIdentity();
+    }
     if (oldWidget.document?.serverId != widget.document?.serverId ||
         oldWidget.api != widget.api ||
         oldWidget.document?.data != widget.document?.data ||
@@ -1108,6 +1188,9 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         // reconcileServerSave path that collapses any failed outbox
         // rows for this same lineage.
         final isEditingExistingDoc = widget.document != null;
+        // Hoisted so the post-save block below can tell a create that returned
+        // a usable name from one that did not. See the re-mint guard there.
+        String? createdServerName;
         if (isInsert) {
           // Preserve any existing offline data + mobile_uuid from the local doc.
           if (widget.document != null) {
@@ -1117,32 +1200,26 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
               ..clear()
               ..addAll(existing);
           }
-          if (widget.getMobileUuid != null &&
-              (payload['mobile_uuid'] == null ||
-                  (payload['mobile_uuid'] as String).isEmpty)) {
-            final uuid = await widget.getMobileUuid!();
-            if (uuid != null && uuid.isNotEmpty) {
-              payload['mobile_uuid'] = uuid;
-            }
-          }
-          // Identity lock: when this is an edit-save of an existing
-          // local record, the mobile_uuid is system-owned metadata
-          // and MUST equal the document's localId. The form payload
-          // and the device-level getMobileUuid callback are both
-          // untrusted for this field — a stray empty string from
-          // either would otherwise fork lineage (the server generates
-          // a fresh UUID, leaving the original docs__ row + failed
-          // outbox row orphaned). See `reconcileServerSave` for the
-          // companion cleanup that runs after the server replies.
-          if (isEditingExistingDoc) {
-            payload['mobile_uuid'] = widget.document!.localId;
-          }
+          // Identity is decided HERE, not by the form payload, and the same way
+          // for a new document as for an edit-save: an existing record is
+          // locked to its `localId` (system-owned metadata — letting a payload
+          // override it forks lineage, stranding the original docs__ row and
+          // its outbox entry; see `reconcileServerSave` for the companion
+          // cleanup), and a new one carries this screen's own document uuid,
+          // which is stable across every retry the operator makes.
+          //
+          // Written unconditionally so a stray null or empty string in the
+          // payload cannot survive: `mobile_uuid = ''` is worse than absent,
+          // because MariaDB permits many NULLs in a unique index but only one
+          // empty string.
+          payload['mobile_uuid'] = _documentMobileUuid;
           final result = await widget.api!.document.createDocument(
             widget.meta.name,
             payload,
           );
           final serverName =
               result['name']?.toString() ?? result['docname']?.toString();
+          createdServerName = serverName;
           if (serverName != null) {
             final merged = Map<String, dynamic>.from(payload)
               ..['name'] = serverName;
@@ -1208,6 +1285,18 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           setState(() {
             _baselineFormData = savedData!;
           });
+          // The created document is finished; the screen is not. See
+          // [_startNewDocumentIdentity].
+          //
+          // `serverName != null` is load-bearing. This block is reached on both
+          // paths, and when the create came back with no usable name the POST
+          // may still have committed — the ambiguous case. Re-minting there
+          // would make a retry write a SECOND document instead of resolving to
+          // the first, so the identity is kept: of the two wrong answers, the
+          // one that can still be reconciled by `mobile_uuid` is the safer.
+          if (widget.document == null && createdServerName != null) {
+            _startNewDocumentIdentity();
+          }
           _isFormDirty.value = false;
           showStatusSnackBar(
             context,
@@ -1221,12 +1310,13 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
 
       // Offline / store-then-sync path
       if (widget.document == null) {
-        if (widget.getMobileUuid != null) {
-          final uuid = await widget.getMobileUuid!();
-          if (uuid != null && uuid.isNotEmpty) {
-            payload['mobile_uuid'] = uuid;
-          }
-        }
+        // Same document identity the online branch uses — see
+        // [_newDocumentMobileUuid]. `saveDocument` mints one itself when the
+        // payload carries none, so this is not load-bearing for a first save;
+        // it is here so a record that starts offline and a record that starts
+        // online are identified the same way, and so a retry after a failed
+        // offline save reuses the identity rather than forking a second row.
+        payload['mobile_uuid'] = _documentMobileUuid;
         await widget.repository.saveDocument(
           doctype: widget.meta.name,
           data: payload,
@@ -1249,6 +1339,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
         setState(() {
           _baselineFormData = savedData;
         });
+        // Same reason as the online branch — and load-bearing here too, since
+        // offline the uuid IS the local row's primary key, so reusing it writes
+        // the next record over the one just saved.
+        if (widget.document == null) _startNewDocumentIdentity();
         _isFormDirty.value = false;
         // A save may have queued freshly-picked attachments; refresh the
         // id→local-path map so any `pending:<id>` markers resolve in-place.

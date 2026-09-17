@@ -7,6 +7,7 @@ import 'auth.dart';
 import 'doctype_service.dart';
 import 'document_service.dart';
 import 'attachment_service.dart';
+import 'create_idempotency.dart';
 import 'query_builder.dart';
 
 class FrappeClient {
@@ -25,6 +26,7 @@ class FrappeClient {
     int listChildDocsPageSize = 1000,
     int listFullDocsPageSize = 1000,
     int listDefaultPageSize = 20,
+    OnResolvedExisting? onResolvedExisting,
   }) : _restHelper = RestHelper(
          baseUrl,
          client: httpClient,
@@ -37,7 +39,13 @@ class FrappeClient {
       listFullDocsPageSize: listFullDocsPageSize,
       listDefaultPageSize: listDefaultPageSize,
     );
-    document = DocumentService(_restHelper);
+    // Threaded, not defaulted to null-and-forgotten: without this the
+    // idempotency listener existed only on a constructor nothing in the SDK
+    // called, so a resolved create was reported to no one on every real path.
+    document = DocumentService(
+      _restHelper,
+      onResolvedExisting: onResolvedExisting,
+    );
     attachment = AttachmentService(_restHelper);
   }
 
