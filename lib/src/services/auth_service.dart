@@ -1,6 +1,7 @@
 import 'dart:developer' as dev;
 
 import '../api/client.dart';
+import '../api/create_idempotency.dart';
 import '../api/exceptions.dart';
 import '../api/oauth2_helper.dart';
 import '../database/app_database.dart';
@@ -193,7 +194,11 @@ class AuthService {
   ///
   /// Optionally provide [database] for stateless login token storage.
   void initialize(String baseUrl, {AppDatabase? database}) {
-    _client = FrappeClient(baseUrl, onTokenExpired: _tryRefreshMobileAuthToken);
+    _client = FrappeClient(
+      baseUrl,
+      onTokenExpired: _tryRefreshMobileAuthToken,
+      onResolvedExisting: onResolvedExisting,
+    );
     _database = database;
     _storage.write(key: _keyBaseUrl, value: baseUrl);
   }
@@ -205,6 +210,15 @@ class AuthService {
 
   /// Returns a stable UUID for this device/install. Creates and stores one if missing.
   /// Use when creating documents from mobile so server can store mobile_uuid.
+  /// Notified when an online create was answered by a document that ALREADY
+  /// existed rather than by writing a new one.
+  ///
+  /// Set BEFORE `initialize()` — it is handed to the `FrappeClient` built
+  /// there. Without it the idempotency guard resolves silently, which is safe
+  /// for plumbing and wrong for a person: a corrected resubmit can resolve to
+  /// the earlier payload and report success. See `OnResolvedExisting`.
+  OnResolvedExisting? onResolvedExisting;
+
   Future<String> getOrCreateMobileUuid() async {
     var value = await _storage.read(key: _keyMobileUuid);
     if (value == null || value.isEmpty) {
@@ -905,6 +919,13 @@ class AuthService {
       );
     }
     _client?.rest.setBearerToken(null);
+    // Forget every remembered create attempt. The idempotency guard's set is
+    // keyed on `(doctype, mobile_uuid)` with no notion of who was signed in, so
+    // without this a new user on the same device inherits the previous
+    // session's history. Harmless in practice — v4 uuids do not collide across
+    // users — but the alternative is a documented requirement that nothing
+    // satisfies, which is how it reads as done when it is not.
+    _client?.document.resetCreateIdempotency();
     _isAuthenticated = false;
     _cachedUserInfo = null;
     _roles = [];

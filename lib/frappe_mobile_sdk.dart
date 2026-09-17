@@ -53,6 +53,21 @@ export 'src/database/daos/doctype_meta_dao.dart';
 export 'src/api/client.dart' show FrappeClient;
 export 'src/api/doctype_service.dart' show DoctypeService;
 export 'src/api/document_service.dart' show DocumentService;
+// Narrowed on purpose: hosts need the field name and the blank-stripping
+// helper to mint and carry a uuid correctly, plus the guard itself for tests.
+// The internal typedef and the attempt cap stay unexported.
+export 'src/api/create_idempotency.dart'
+    show
+        CreateIdempotencyGuard,
+        // The two typedefs are exported for the same reason `ResolveMediaFn`
+        // is: assignment infers the type, but a host that DECLARES or STORES
+        // one has to be able to name it.
+        OnResolvedExisting,
+        FindByMobileUuid,
+        kMobileUuidField,
+        readMobileUuid,
+        withoutBlankMobileUuid,
+        isAmbiguousCreateFailure;
 export 'src/api/attachment_service.dart' show AttachmentService;
 export 'src/api/exceptions.dart'
     show
