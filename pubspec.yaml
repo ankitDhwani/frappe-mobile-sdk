@@ -57,7 +57,7 @@ dependencies:
   path_provider: ^2.1.2
 
   # Secure storage for tokens
-  flutter_secure_storage: ^10.0.0
+  flutter_secure_storage: ">=10.0.0 <12.0.0"
 
   # OAuth PKCE
   crypto: ^3.0.3
@@ -82,7 +82,7 @@ dependencies:
   uuid: ^4.3.3
 
   # File picker for attachments
-  file_picker: ^11.0.2
+  file_picker: ">=11.0.2 <14.0.0"
 
   # Image picker for image fields
   image_picker: ^1.1.2
