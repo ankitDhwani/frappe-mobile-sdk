@@ -34,10 +34,11 @@ import 'image_field.dart';
 ///     cancel.
 ///
 /// The SELECTION SEMANTICS changed with it, which matters at the call site:
-/// 11.x has `allowMultiple = false` by default, while 12.x and 13.x removed the
-/// parameter altogether — `pickFiles()` is always multi-select there, and
-/// single-select moved to a separate `pickFile()`. So a caller inside this
-/// range must be prepared for MORE THAN ONE file however it was invoked.
+/// 11.x defaults `allowMultiple` to `false`; 12.x flips that default to `true`
+/// and deprecates the parameter, and 13.x removes it outright, moving
+/// single-select to a separate `pickFile()`. So from 12.x on `pickFiles()` is
+/// multi-select whatever the caller intended, and anything in this range must
+/// be prepared for MORE THAN ONE file.
 ///
 /// Dart has no conditional compilation, so one source file cannot statically
 /// typecheck against both. This function is the SINGLE point where the
