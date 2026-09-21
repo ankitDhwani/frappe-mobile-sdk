@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`develop` now cuts `-beta.N` prereleases, so a beta no longer has to be tagged and versioned by hand.** `.releaserc` listed only `main` and `master`, which meant every `2.0.0-beta.*` to date was hand-cut; semantic-release had no way to produce one. `develop` is now a prerelease branch (`{ "name": "develop", "prerelease": "beta" }`), and because `v2.0.0-beta.3` is an ancestor of `develop` the counter continues from it rather than restarting — the next prerelease is `2.0.0-beta.4`. The release chain is **three links and all three must agree**: the branch has to appear in `.releaserc` `branches`, `release.yml` has to trigger on it, and the commits since the last tag have to contain a type that releases. `release.yml` previously triggered on `[main, master]` only, so configuring `.releaserc` alone would have been decoration; both now list `develop`, and a comment in the workflow says why they are coupled. The third link is the one to watch: `chore`, `docs`, `ci`, `refactor`, `test`, `build` and `style` are all `"release": false`, so a branch carrying only those cuts **nothing at all**, and `workflow_dispatch` does not override that — commit-analyzer still decides and exits "no release published". Those rules are deliberately left alone: a dependency bump is not a release, and the alternative is a version number that climbs on housekeeping. What merging produces is a tag, a version bump committed by the release bot, and a GitHub Release. It does **not** put anything on pub.dev — the repository contains no publish automation (`dart pub publish` appears only as `--dry-run` in `doc/TESTING.md` and `doc/QUICK_TEST.md`), so that step stays manual and deliberate.
+
+- **The release helper no longer appends `-dev` to a version that is already a prerelease.** `update-version.py` stamps the example app at `<version>-dev`, which for a stable release sorts *below* it and correctly reads as "a dev build on the way to 2.1.0". On a prerelease the marker inverts, and measurably so: against `pub_semver`, `2.0.0-beta.4-dev`, `2.0.0-beta.4.dev` and `2.0.0-beta.4+dev` all sort **above** `2.0.0-beta.4` — the first two because they add a prerelease identifier, the third because pub ranks build metadata instead of ignoring it the way SemVer 2.0 §10 specifies. Since no suffix preserves the intended meaning, a prerelease version is now used verbatim, which is also what the hand-cut `2.0.0-beta.3` release already did to `example/pubspec.yaml`. The example declares `publish_to: 'none'`, so nothing ever resolved against this number; the fix is to stop the file asserting something untrue.
+
 ## [2.0.0-beta.3] - 2026-09-17
 
 ### Added

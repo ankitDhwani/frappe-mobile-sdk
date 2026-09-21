@@ -1,7 +1,12 @@
 name: Release
+
+# `main` cuts a stable release; `develop` cuts a `-beta.N` prerelease. The branch
+# must be listed BOTH here and in `.releaserc` `branches` — semantic-release
+# refuses to release from a branch it was not configured for, so a trigger added
+# in only one of the two files is inert.
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, develop ]
   workflow_dispatch:
 
 permissions:
