@@ -61,7 +61,7 @@
 		[
 			"@semantic-release/git",
 			{
-				"assets": ["pubspec.yaml", "example/pubspec.yaml"],
+				"assets": ["pubspec.yaml", "example/pubspec.yaml", "example/pubspec.lock"],
 				"message": "chore(release): Bumped to Version ${nextRelease.version}"
 			}
 		],
