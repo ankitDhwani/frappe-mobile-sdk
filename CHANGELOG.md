@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`file_picker` and `flutter_secure_storage` constraints widened, so consumers may take the newer majors without being made to.** Both were capped below a major that has since moved (`file_picker: ^11.0.2`, `flutter_secure_storage: ^10.0.0`), which is the only thing that kept the package off a full pub score. They are now `">=11.0.2 <14.0.0"` and `">=10.0.0 <12.0.0"`. Widening cannot move an existing consumer — pub keeps resolving whatever it already resolved, and a fresh resolve still picks `file_picker 11.0.2` and `flutter_secure_storage 10.3.1`, with the committed lockfile entries for both unchanged. That distinction is the whole point: pinning to the newest major would have forced every consumer to migrate in lockstep, which a widened range does not. `file_picker` 13 is the half that needed work, because it removed the nullable `FilePickerResult` wrapper and returns `List<PlatformFile>` straight from `pickFiles()` — two shapes that cannot both satisfy one statically-typed call site, and Dart has no conditional compilation. **`pickedFilesOf` is the single point where that is absorbed**: it takes `Object?` so it accepts either static type, and hands every caller one shape. Input it cannot interpret reads as "no selection" rather than throwing, since a picker that cannot be understood must not take the form down — but the catch is narrowed to `NoSuchMethodError` so a genuine fault inside a real picker still surfaces instead of being silently reclassified as a user cancel. `flutter_secure_storage` needed no shim; 11.x is source-compatible on the API this package uses. Verified at **both** ends of both ranges rather than the one that happens to resolve — analyze clean and the full suite green on `file_picker 11.0.2` / `flutter_secure_storage 10.3.1` and on `13.1.0` / `11.2.0` — and the five new tests are duck-typed, so they exercise the 11/12 branch regardless of which version a run resolves.
+
 ## [2.0.0-beta.3] - 2026-09-17
 
 ### Added
