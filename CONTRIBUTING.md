@@ -42,10 +42,20 @@ For large or API-breaking changes, it helps to open an issue first to agree on d
 Run the same checks CI runs:
 
 ```bash
+# `flutter analyze` covers the example app too, and `example/lib/main.dart`
+# imports a gitignored config file. Without this copy the analyze fails with
+# `Target of URI doesn't exist: 'config/app_config.dart'` — CI does the same
+# copy as its first step, which is why this only bites locally.
+cp example/lib/config/app_config.example.dart example/lib/config/app_config.dart
+
 dart format .
 flutter analyze
 flutter test
 ```
+
+Note that CI checks formatting with `dart format --output=none
+--set-exit-if-changed .`, which reports rather than rewrites. Run `dart format`
+on the files you changed before pushing.
 
 Pre-commit automation (recommended) is documented in [`.github/PRE_COMMIT.md`](.github/PRE_COMMIT.md), including:
 
@@ -68,7 +78,7 @@ CI validates commit messages using [Conventional Commits](https://www.convention
 
 ## Pull requests
 
-1. Fork the repository and create a branch from `main` (or the target branch your PR should merge into).
+1. Fork the repository and create a branch from `develop`, and target `develop`. That is the integration branch and the repository's default. `main` is where stable releases are cut, though both branches currently sit on the same 2.0 beta.
 2. Keep changes focused; avoid unrelated refactors in the same PR.
 3. Update or add tests when behavior changes.
 4. Ensure `dart format`, `flutter analyze`, and `flutter test` pass locally.

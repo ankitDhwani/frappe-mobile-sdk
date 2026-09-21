@@ -1,11 +1,22 @@
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
+import '../../../utils/frappe_reserved_fields.dart';
 import '../../../utils/translate.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 
 /// Widget for Select field type. Supports single and multi-select (when field.allowMultiple).
 class SelectField extends BaseField {
+  /// When false, the single-option preselect below never fires for this
+  /// field. `FieldFactory` sets it from [isFrappeReservedField] so a
+  /// framework-owned slot (`naming_series`, `amended_from`, the `is_tree`
+  /// `parent_<doctype>` Link, …) is never filled with a value the user did not
+  /// choose. Defaults to true so a host constructing this widget directly
+  /// keeps the previous behaviour.
+  final bool allowPreselect;
+
   const SelectField({
     super.key,
     required super.field,
@@ -13,17 +24,64 @@ class SelectField extends BaseField {
     super.onChanged,
     super.enabled,
     super.style,
+    this.allowPreselect = true,
   });
 
   /// Raw (untranslated) option keys — used as stored document values.
+  ///
+  /// Deduplicated, order-preserving: `DropdownButton` asserts when two
+  /// `DropdownMenuItem`s share the value it is showing ("There should be
+  /// exactly one item with [DropdownButton]'s value"), so a DocType whose
+  /// `options` repeats a line would crash the field outright. Deduping also
+  /// restores the preselect for a sole option that happens to be written
+  /// twice — the count is 1 again, not 2.
   List<String> _getRawOptions() {
     if (field.options == null || field.options!.isEmpty) return [];
-    return field.options!
-        .split('\n')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toList();
+    return LinkedHashSet<String>.of(
+      field.options!
+          .split('\n')
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty),
+    ).toList();
   }
+
+  /// Guards that apply to the single-option preselect on BOTH shapes: the
+  /// reserved-field gate (see [isFrappeReservedField]) and the field's own
+  /// editability. A field the user may not change must not be filled for them.
+  ///
+  /// The multi-select path adds one more clause at its call site — `value ==
+  /// null` — and it is deliberately NOT here, because the two shapes do not
+  /// share the problem it solves:
+  ///
+  ///  * **Multi-select** emits `''` for an empty selection (`_listToValue([])`),
+  ///    so an explicit clear is indistinguishable from "never set" if the gate
+  ///    only asks whether the selection is valid. The preselect lives in
+  ///    `build()`, so unchecking the sole option re-fired it on the very next
+  ///    frame and pushed the value back — while `FormBuilderCheckboxGroup`,
+  ///    whose `ValueKey` had not changed, stayed visibly unchecked. With
+  ///    `reqd: 1` that raised a required error while `_formData` still held the
+  ///    value, and `_handleSubmit`'s `formValues.addAll(_formData)` let the
+  ///    stale value win on save. `value == null` is what distinguishes the two.
+  ///
+  ///  * **Single dropdown** cannot reach that state. It passes `String?`
+  ///    straight through (`onChanged: (val) => onChanged?.call(val)`), so
+  ///    clearing yields `null`, never `''`. There is no clear/re-fire loop to
+  ///    break.
+  ///
+  /// Applying `value == null` to the single dropdown anyway would therefore fix
+  /// nothing there and would change one thing only: a document PULLED from the
+  /// server arrives holding `''` (Frappe stores an unset Select as
+  /// `varchar NOT NULL DEFAULT ''`), so a synced record with a one-option
+  /// required Select would stop being filled in and the user would have to open
+  /// the dropdown and pick the only choice by hand.
+  ///
+  /// That is a behaviour change owing its own evidence, not a ride-along on a
+  /// multi-select bug — and shipping it on this path alone would have left the
+  /// single dropdown and [LinkField], which are the same affordance over the
+  /// same input, behaving oppositely for no reason a reader could find. Both
+  /// now preselect over a pulled `''`. Whether NEITHER should is a real
+  /// question; it belongs to whichever change can show the evidence for it.
+  bool get _canPreselect => allowPreselect && enabled && !field.readOnly;
 
   /// Translated display labels — used only for rendering.
   List<String> _getOptions() {
@@ -80,12 +138,20 @@ class SelectField extends BaseField {
           .where((v) => rawOptions.contains(v))
           .toList();
 
-      // Auto-select when exactly one option and no valid selection.
+      // Preselect when exactly one option and nothing is selected yet.
       // Use raw English key for the stored value.
-      final displayList = rawOptions.length == 1 && validInitialList.isEmpty
-          ? [rawOptions.first]
-          : validInitialList;
-      if (rawOptions.length == 1 && validInitialList.isEmpty) {
+      //
+      // `value == null` is the multi-select-only clause: it fires only when the
+      // form holds NO ENTRY for this field, so an explicit clear (which stores
+      // `''`) is not mistaken for "never set" and re-filled on the next frame.
+      // See [_canPreselect] for why the single dropdown does not need it.
+      final preselect =
+          rawOptions.length == 1 &&
+          validInitialList.isEmpty &&
+          value == null &&
+          _canPreselect;
+      final displayList = preselect ? [rawOptions.first] : validInitialList;
+      if (preselect) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           onChanged?.call(_listToValue([rawOptions.first]));
         });
@@ -132,10 +198,11 @@ class SelectField extends BaseField {
       }
     }
 
-    // Auto-select when exactly one option and no valid selection.
+    // Preselect when exactly one option and nothing is selected yet.
     // Emit raw English key — never a translated label.
     if (rawOptions.length == 1 &&
-        (validInitialValue == null || validInitialValue.isEmpty)) {
+        (validInitialValue == null || validInitialValue.isEmpty) &&
+        _canPreselect) {
       validInitialValue = rawOptions.first;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         onChanged?.call(rawOptions.first);
