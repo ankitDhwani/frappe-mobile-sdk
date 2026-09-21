@@ -197,15 +197,29 @@ void main() {
     );
 
     testWidgets(
-      'a stored empty string is never preselected — single-select, which is '
-      'how every pulled document arrives',
+      'a stored empty string IS preselected — single-select, matching LinkField '
+      'on the same input',
       (tester) async {
         // Frappe stores an unset Select as `varchar NOT NULL DEFAULT ''` and
-        // returns `""`. The pull writes it verbatim and
-        // `_formData.addAll(widget.initialData ?? {})` normalises nothing, so
-        // this — not the clear — is the case a field team meets first: a
-        // synced record with a one-option Select stays empty, and with
-        // `reqd: 1` the user must pick the sole choice by hand.
+        // returns `""`, which the pull writes verbatim, so this is how every
+        // pulled document arrives.
+        //
+        // The multi-select gate above (`value == null`) deliberately does NOT
+        // extend here. A single dropdown passes `String?` straight through
+        // (`onChanged: (val) => onChanged?.call(val)`), so clearing it yields
+        // `null`, never `''` — the clear/re-fire loop that gate exists to break
+        // cannot occur on this path. Applying it anyway would fix nothing and
+        // change one thing only: a synced record with a one-option required
+        // Select would stop being filled in, leaving the user to open the
+        // dropdown and pick the only choice by hand.
+        //
+        // It would also have made this widget disagree with `LinkField`, which
+        // is the same affordance over the same input and still preselects here
+        // — see `link_field_preselect_test.dart`'s "an empty stored value"
+        // group, which asserts the matching behaviour. Whether NEITHER should
+        // preselect over a pulled value is a real question, but it is one
+        // change across both widgets on its own evidence, not a side effect of
+        // a multi-select fix.
         final key = GlobalKey<_HostState>();
         await tester.pumpWidget(
           _Host(
@@ -217,8 +231,10 @@ void main() {
         await tester.pumpAndSettle();
         expect(
           key.currentState!.emissions,
-          isEmpty,
-          reason: 'a pulled document must not be auto-filled on open',
+          ['Only'],
+          reason:
+              'single-select must match LinkField, which preselects over a '
+              "pulled document's empty string",
         );
       },
     );

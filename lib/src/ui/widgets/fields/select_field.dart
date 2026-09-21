@@ -45,49 +45,43 @@ class SelectField extends BaseField {
     ).toList();
   }
 
-  /// Whether the single-option preselect may fire.
+  /// Guards that apply to the single-option preselect on BOTH shapes: the
+  /// reserved-field gate (see [isFrappeReservedField]) and the field's own
+  /// editability. A field the user may not change must not be filled for them.
   ///
-  /// `value == null` is the load-bearing clause: it fires only when the form
-  /// holds NO ENTRY for this field, not merely when the entry is unusable.
+  /// The multi-select path adds one more clause at its call site — `value ==
+  /// null` — and it is deliberately NOT here, because the two shapes do not
+  /// share the problem it solves:
   ///
-  /// It has TWO callers, and only the first is a bug fix:
+  ///  * **Multi-select** emits `''` for an empty selection (`_listToValue([])`),
+  ///    so an explicit clear is indistinguishable from "never set" if the gate
+  ///    only asks whether the selection is valid. The preselect lives in
+  ///    `build()`, so unchecking the sole option re-fired it on the very next
+  ///    frame and pushed the value back — while `FormBuilderCheckboxGroup`,
+  ///    whose `ValueKey` had not changed, stayed visibly unchecked. With
+  ///    `reqd: 1` that raised a required error while `_formData` still held the
+  ///    value, and `_handleSubmit`'s `formValues.addAll(_formData)` let the
+  ///    stale value win on save. `value == null` is what distinguishes the two.
   ///
-  ///  1. An EXPLICIT clear stores `''` (multi-select emits
-  ///     `_listToValue([])`). Preselecting on "no valid selection" alone made
-  ///     "cleared" and "never set" indistinguishable, so unchecking the sole
-  ///     option of a multi-select re-fired the preselect on the very next
-  ///     build and pushed the value back — while `FormBuilderCheckboxGroup`,
-  ///     whose `ValueKey` had not changed, stayed visibly unchecked. The
-  ///     widget and the form data then disagreed, and `_handleSubmit`'s
-  ///     `formValues.addAll(_formData)` let the form data win.
+  ///  * **Single dropdown** cannot reach that state. It passes `String?`
+  ///    straight through (`onChanged: (val) => onChanged?.call(val)`), so
+  ///    clearing yields `null`, never `''`. There is no clear/re-fire loop to
+  ///    break.
   ///
-  ///  2. A PULLED DOCUMENT also arrives holding `''`, and is the more common
-  ///     caller by far. Frappe stores an unset Select as `varchar NOT NULL
-  ///     DEFAULT ''` and returns `""`; the pull writes that verbatim and
-  ///     `FrappeFormBuilder`'s `_formData.addAll(widget.initialData ?? {})`
-  ///     normalises nothing in between. So a synced record with a one-option
-  ///     Select is NOT auto-filled, and with `reqd: 1` the user must pick the
-  ///     sole choice by hand. That is deliberate: auto-filling a synced record
-  ///     writes a value the user never chose and dirties the document on open.
-  ///     In practice preselect now fires only on documents this device
-  ///     created.
+  /// Applying `value == null` to the single dropdown anyway would therefore fix
+  /// nothing there and would change one thing only: a document PULLED from the
+  /// server arrives holding `''` (Frappe stores an unset Select as
+  /// `varchar NOT NULL DEFAULT ''`), so a synced record with a one-option
+  /// required Select would stop being filled in and the user would have to open
+  /// the dropdown and pick the only choice by hand.
   ///
-  /// Keying on `value == null` rather than `!formData.containsKey(fieldname)`
-  /// is also the convention this repo settled on in `843b86b` — an unsaved doc
-  /// is routinely assembled with explicit `null` entries, so key presence is
-  /// the trap.
-  ///
-  /// NOTE: `LinkField` deliberately does NOT share this gate. Both of its
-  /// preselect sites still test "no valid selection"
-  /// (`validInitialValue == null || validInitialValue.isEmpty` for static
-  /// options, `!hasValidSelection` for service-loaded ones), so a single-option
-  /// Link DOES still preselect over the `''` of a pulled document. Pinned by
-  /// `link_field_preselect_test.dart`'s "an empty stored value" group. The
-  /// clear/re-fire loop above is specific to the multi-select checkbox path,
-  /// which `LinkField` has no equivalent of; aligning the two is a behaviour
-  /// change on its own evidence, not a ride-along.
-  bool get _canPreselect =>
-      allowPreselect && enabled && !field.readOnly && value == null;
+  /// That is a behaviour change owing its own evidence, not a ride-along on a
+  /// multi-select bug — and shipping it on this path alone would have left the
+  /// single dropdown and [LinkField], which are the same affordance over the
+  /// same input, behaving oppositely for no reason a reader could find. Both
+  /// now preselect over a pulled `''`. Whether NEITHER should is a real
+  /// question; it belongs to whichever change can show the evidence for it.
+  bool get _canPreselect => allowPreselect && enabled && !field.readOnly;
 
   /// Translated display labels — used only for rendering.
   List<String> _getOptions() {
@@ -145,10 +139,17 @@ class SelectField extends BaseField {
           .toList();
 
       // Preselect when exactly one option and nothing is selected yet.
-      // Use raw English key for the stored value. See [_canPreselect] for why
-      // an explicitly-cleared value ('') is excluded.
+      // Use raw English key for the stored value.
+      //
+      // `value == null` is the multi-select-only clause: it fires only when the
+      // form holds NO ENTRY for this field, so an explicit clear (which stores
+      // `''`) is not mistaken for "never set" and re-filled on the next frame.
+      // See [_canPreselect] for why the single dropdown does not need it.
       final preselect =
-          rawOptions.length == 1 && validInitialList.isEmpty && _canPreselect;
+          rawOptions.length == 1 &&
+          validInitialList.isEmpty &&
+          value == null &&
+          _canPreselect;
       final displayList = preselect ? [rawOptions.first] : validInitialList;
       if (preselect) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
