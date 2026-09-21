@@ -92,7 +92,31 @@ dependencies:
 
 Package page: `https://pub.dev/packages/frappe_mobile_sdk`
 
-From Git:
+### Taking a prerelease
+
+The 2.x line is published as `2.0.0-beta.N`. **A caret on a stable version will
+not give you one:** `2.0.0-beta.4` is ordered *below* `2.0.0`, so `^2.0.0`
+resolves `>=2.0.0 <3.0.0` and skips every beta — and `flutter pub add` writes
+exactly that. Ask for the prerelease explicitly, with a lower bound that is
+itself a prerelease:
+
+```yaml
+dependencies:
+  # >=2.0.0-beta.3 <3.0.0 — takes later betas and the eventual 2.0.0 stable
+  frappe_mobile_sdk: ^2.0.0-beta.3
+```
+
+Pin a single beta if you would rather adopt each one deliberately:
+
+```yaml
+dependencies:
+  frappe_mobile_sdk: 2.0.0-beta.3
+```
+
+Betas are cut from `develop` and are not API-frozen — read
+[`CHANGELOG.md`](CHANGELOG.md) before moving between them.
+
+### From Git
 
 ```yaml
 dependencies:
@@ -102,6 +126,7 @@ dependencies:
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
+      # `main` is the stable line; `develop` is where beta work lands
       ref: main
 ```
 
@@ -632,9 +657,18 @@ Before using this SDK, you need to install the **Frappe Mobile Control** app on 
 
 ```yaml
 dependencies:
+  # The 2.x line is in beta; `^2.0.0` would skip it. See "Taking a prerelease".
+  frappe_mobile_sdk: ^2.0.0-beta.3
+```
+
+Or from Git:
+
+```yaml
+dependencies:
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
+      # `main` is the stable line; `develop` is where beta work lands
       ref: main
 ```
 
