@@ -31,7 +31,10 @@ dependencies:
   # that has no effect on this repository's own build.
   frappe_mobile_sdk: ^2.0.0-beta.3
 
-# For local development in this repository, uncomment this override:
+# Active on purpose: the example always builds against the SDK in this
+# repository, so a change under ../lib shows up here without a publish.
+# It is also what makes the constraint above inert HERE — delete this block
+# if you copy this file into your own app, and the constraint applies.
 dependency_overrides:
   frappe_mobile_sdk:
     path: ../

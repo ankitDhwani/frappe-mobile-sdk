@@ -27,10 +27,17 @@ import 'image_field.dart';
 /// Normalises the result of `FilePicker.pickFiles()` across the file_picker
 /// major versions this SDK supports (`>=11.0.2 <14.0.0`).
 ///
-/// The shape changed without a source-compatible bridge:
-///   * **11.x / 12.x** return a nullable `FilePickerResult?` whose `.files` is
-///     the selection; `null` means the user cancelled.
-///   * **13.x** returns `List<PlatformFile>` directly; an empty list is cancel.
+/// The shape changed in 12.0.0, without a source-compatible bridge:
+///   * **11.x** returns a nullable `FilePickerResult?` whose `.files` is the
+///     selection; `null` means the user cancelled.
+///   * **12.x / 13.x** return `List<PlatformFile>` directly; an empty list is
+///     cancel.
+///
+/// The SELECTION SEMANTICS changed with it, which matters at the call site:
+/// 11.x has `allowMultiple = false` by default, while 12.x and 13.x removed the
+/// parameter altogether — `pickFiles()` is always multi-select there, and
+/// single-select moved to a separate `pickFile()`. So a caller inside this
+/// range must be prepared for MORE THAN ONE file however it was invoked.
 ///
 /// Dart has no conditional compilation, so one source file cannot statically
 /// typecheck against both. This function is the SINGLE point where the
@@ -49,10 +56,41 @@ List<Object?> pickedFilesOf(Object? raw) {
     final files = (raw as dynamic).files;
     return files is List ? files : const [];
   } on NoSuchMethodError {
-    // Not a shape this SDK knows. Caught NARROWLY — only the absent-getter
-    // case — so a genuine fault inside a real picker still surfaces instead of
-    // being silently swallowed as "user cancelled".
+    // Not a shape this SDK knows. Narrowed to this ONE exception type so a
+    // genuine fault in a real picker surfaces rather than being reclassified as
+    // "user cancelled". It is not narrowed by ORIGIN — a NoSuchMethodError
+    // raised inside a real `.files` getter would land here too. Accepted
+    // because every supported `.files` is a plain field access, so there is no
+    // getter body for one to come from.
     return const [];
+  }
+}
+
+/// The one filesystem path this field should adopt from a `pickFiles()` result,
+/// or `null` for "nothing to attach".
+///
+/// Exists as a separate function because the decision it encodes is NOT
+/// obvious and was got wrong once. An `Attach` docfield holds a single file,
+/// but `pickFiles()` can hand back several: 12.x and 13.x removed
+/// `allowMultiple`, so the dialog is always multi-select there regardless of
+/// how it is invoked. Taking `.single` — which is what this code did — threw
+/// `StateError` the moment a user selected two files, and the call site's
+/// catch-all turned that into a silent "attach failed". So: FIRST, not single.
+///
+/// Splitting it out is what makes that testable at all. The call site is a
+/// button callback that invokes the STATIC `FilePicker.pickFiles()`, and a fake
+/// platform cannot be written to typecheck against both majors — the same
+/// reason [pickedFilesOf] is duck-typed. A pure function over the result shape
+/// is the only seam a cross-version test can reach.
+String? pickedPathOf(Object? raw) {
+  final files = pickedFilesOf(raw);
+  if (files.isEmpty) return null;
+  try {
+    final path = (files.first as dynamic).path;
+    return path is String ? path : null;
+  } on NoSuchMethodError {
+    // An entry that is not a PlatformFile: unusable, same as cancel.
+    return null;
   }
 }
 
@@ -324,14 +362,14 @@ class AttachField extends BaseField {
                             // denied storage permission.
                             try {
                               // Normalised across the supported file_picker
-                              // major range — see [pickedFilesOf]. Cancel is an
-                              // empty list in both shapes.
-                              final files = pickedFilesOf(
+                              // major range, and reduced to the single path
+                              // this field holds — see [pickedPathOf]. Cancel,
+                              // an unreadable shape and a pathless entry all
+                              // arrive here as null.
+                              final path = pickedPathOf(
                                 await FilePicker.pickFiles(),
                               );
-                              if (files.isEmpty) return;
-                              final path = (files.single as dynamic).path;
-                              if (path is! String) return;
+                              if (path == null) return;
                               final picked = File(path);
                               // Durable-copy-first; upload inline when online,
                               // else keep the local path for save-time queueing.
