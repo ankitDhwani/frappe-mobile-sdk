@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`develop` now cuts `2.0.0-beta.N` prereleases through semantic-release**, instead of them being tagged and versioned by hand as all three existing betas were. A beta is fired **by hand**, with `workflow_dispatch` against `develop`; `develop` is deliberately not on the push trigger, so merging to it releases nothing. semantic-release still computes `beta.4`, `beta.5` and so on, so the hand-versioning is gone either way — what stays manual is the decision to cut. Two reasons: publishing to pub.dev is manual regardless (there is no publish automation here), so an automatic tag would not reach a consumer any sooner; and each release costs a doubled CI run, because the bot's `chore(release):` bump is pushed with a GitHub App token and App-token pushes do re-trigger workflows. Making betas automatic later is one line — add `develop` to `release.yml`'s `push.branches`. Releases from `main` are unaffected, and `chore`/`docs`/`ci` remain `"release": false` so housekeeping cuts nothing.
+
+- **`channel: false` on that branch entry is load-bearing — do not remove it.** semantic-release decides which tags belong to a branch by reading the git note each release writes, not the tag name, and a `prerelease` branch looks for tags noted with its own name. The existing beta tags were cut by hand and carry `{"channels":[null]}` or no note, so without this flag they are invisible, the last release resolves to `1.3.0`, and the next prerelease computes as `1.4.0-beta.1` — a downgrade, applied silently, because the guard that rejects a backwards version is skipped for prerelease branches. Releases cut with the flag write `{"channels":[null]}` themselves (`channel || null`), so automated and hand-cut tags stay mutually visible and a hand-cut beta dropped between two automated ones is still found.
+
+- **`update-version.py` no longer appends `-dev` to a version that is already a prerelease**, and now also updates the `frappe_mobile_sdk` entry in `example/pubspec.lock`, which had been left a release behind on every cut. The `-dev` suffix sorts *below* a stable release but *above* a prerelease — measured against `pub_semver`, `-dev`, `.dev` and `+dev` all rank higher than `2.0.0-beta.4` — so on a prerelease the version is used verbatim.
+
+### Removed
+
+- **`@semantic-release/changelog`**, whose output was already discarded: `@semantic-release/git` `assets` replaces the plugin default rather than extending it, so the regenerated file never reached the release commit. This changelog stays hand-written.
+
 ## [2.0.0-beta.3] - 2026-09-17
 
 ### Added
