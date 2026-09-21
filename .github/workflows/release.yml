@@ -1,12 +1,27 @@
 name: Release
 
-# `main` cuts a stable release; `develop` cuts a `-beta.N` prerelease. The branch
-# must be listed BOTH here and in `.releaserc` `branches` — semantic-release
-# refuses to release from a branch it was not configured for, so a trigger added
-# in only one of the two files is inert.
+# `main` cuts a stable release on push. `develop` cuts a `-beta.N` prerelease but
+# is DELIBERATELY NOT on the push trigger: a beta is fired by hand, with
+# `workflow_dispatch` against `develop`. semantic-release still works out that
+# the next one is `beta.4`, `beta.5` and so on, so the hand-versioning this
+# replaces is gone either way — what stays manual is the DECISION to cut.
+#
+# Two reasons it is not automatic. Publishing to pub.dev is manual anyway (there
+# is no publish automation here), so an automatic tag would not put anything in
+# front of a consumer any sooner. And every release costs a DOUBLED CI run: the
+# bot's `chore(release):` bump is pushed with a GitHub App installation token,
+# and App-token pushes do re-trigger workflows, so each cut re-fires `ci.yml`
+# (~4m30s) plus a `release.yml` run that exits "no release published". Rare on
+# `main`; once per beta on `develop`.
+#
+# A branch must be listed BOTH in `.releaserc` `branches` and here (or dispatched
+# against) — semantic-release refuses to release from a branch it was not
+# configured for, so `develop` stays in `.releaserc` even though it is absent
+# below. Adding it to `push.branches` is all that is needed to make betas
+# automatic later.
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
