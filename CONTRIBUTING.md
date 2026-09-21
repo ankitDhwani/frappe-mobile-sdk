@@ -78,7 +78,7 @@ CI validates commit messages using [Conventional Commits](https://www.convention
 
 ## Pull requests
 
-1. Fork the repository and create a branch from `develop`, and target `develop`. That is the integration branch: releases are cut from it as `2.0.0-beta.N` prereleases, and `main` carries the stable line.
+1. Fork the repository and create a branch from `develop`, and target `develop`. That is the integration branch and the repository's default. `main` is where stable releases are cut, though both branches currently sit on the same 2.0 beta.
 2. Keep changes focused; avoid unrelated refactors in the same PR.
 3. Update or add tests when behavior changes.
 4. Ensure `dart format`, `flutter analyze`, and `flutter test` pass locally.

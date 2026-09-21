@@ -116,6 +116,29 @@ dependencies:
 Betas are cut from `develop` and are not API-frozen — read
 [`CHANGELOG.md`](CHANGELOG.md) before moving between them.
 
+### Native platform floors
+
+Two dependencies are declared as ranges spanning a major, so a fresh resolve (a
+new app, or any `flutter pub upgrade`) takes the newest allowed version. Those
+carry **native** requirements that pub cannot enforce and `flutter analyze` /
+`flutter test` cannot see, because they live in Gradle and CocoaPods:
+
+| If you resolve | Requirement | Do you need to act? |
+|---|---|---|
+| `flutter_secure_storage` 11.x | Android `minSdk 24` | **No.** Flutter 3.35 — this package's own floor — already defaults `flutter.minSdkVersion` to 24, so an app using `minSdk = flutter.minSdkVersion` is already there. |
+| `flutter_secure_storage` 11.x | `compileSdk` | **No.** 11.2.0 declares `compileSdk = flutter.compileSdkVersion`, so it inherits the app's and cannot exceed it. |
+| `file_picker` 12.x or 13.x | **iOS deployment target 14.0** (via `file_picker_darwin`) | **Yes, if your Podfile is below 14.0.** Raise `platform :ios, '14.0'`. |
+
+One migration note that is not a floor: `flutter_secure_storage` 11.0.0 removed
+`encryptedSharedPreferences` and two cipher algorithms, and data written by an
+earlier version using those options is unreadable afterwards. This SDK calls
+`FlutterSecureStorage()` with default options and is unaffected, but a host that
+passes its own `AndroidOptions` should read that package's changelog before
+upgrading.
+
+To stay on the floor of both ranges instead, pin them in your own `pubspec.yaml`
+— a widened range in this package never forces a major on you.
+
 ### From Git
 
 ```yaml
@@ -126,7 +149,9 @@ dependencies:
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
-      # `main` is the stable line; `develop` is where beta work lands
+      # Both `main` and `develop` currently sit on the same 2.0 beta, so
+      # neither ref is a stable line today. Pin a tag if you need one
+      # version — a branch ref moves under you.
       ref: main
 ```
 
@@ -668,7 +693,9 @@ dependencies:
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
-      # `main` is the stable line; `develop` is where beta work lands
+      # Both `main` and `develop` currently sit on the same 2.0 beta, so
+      # neither ref is a stable line today. Pin a tag if you need one
+      # version — a branch ref moves under you.
       ref: main
 ```
 

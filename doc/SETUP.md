@@ -34,7 +34,9 @@ dependencies:
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
-      # `main` is the stable line; `develop` is where beta work lands
+      # Both `main` and `develop` currently sit on the same 2.0 beta, so
+      # neither ref is a stable line today. Pin a tag if you need one
+      # version — a branch ref moves under you.
       ref: main
 ```
 

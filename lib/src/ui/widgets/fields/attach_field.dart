@@ -367,10 +367,27 @@ class AttachField extends BaseField {
                               // this field holds — see [pickedPathOf]. Cancel,
                               // an unreadable shape and a pathless entry all
                               // arrive here as null.
-                              final path = pickedPathOf(
+                              final files = pickedFilesOf(
                                 await FilePicker.pickFiles(),
                               );
+                              final path = pickedPathOf(files);
                               if (path == null) return;
+                              if (files.length > 1) {
+                                // From file_picker 12 the dialog is multi-select
+                                // and cannot be told otherwise — there is no
+                                // single-select call common to the whole
+                                // supported range (11.x has no `pickFile()`,
+                                // 13.x has no `allowMultiple`). So a user can
+                                // genuinely select several files for a field
+                                // that holds one, and taking the first is
+                                // forced rather than chosen. Say so: dropping
+                                // the extras in silence is the same failure
+                                // this replaced, only quieter.
+                                _notify(
+                                  messenger,
+                                  'Only the first file was attached.',
+                                );
+                              }
                               final picked = File(path);
                               // Durable-copy-first; upload inline when online,
                               // else keep the local path for save-time queueing.
