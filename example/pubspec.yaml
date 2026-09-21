@@ -13,8 +13,23 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Test tooling for `lib/creation_capture_probe.dart`; the demo app itself
+  # does not use it.
   flutter_skill: ^0.9.36
-  frappe_mobile_sdk: ^1.0.0
+
+  # Tracks the 2.x prerelease line. The prerelease is part of the constraint on
+  # purpose: a caret on a stable version does NOT admit prereleases, because
+  # `2.0.0-beta.4` is ordered BELOW `2.0.0`, so `^2.0.0` resolves
+  # `>=2.0.0 <3.0.0` and skips every beta. Only a lower bound that is itself a
+  # prerelease lets one through -- `^2.0.0-beta.3` is `>=2.0.0-beta.3 <3.0.0`,
+  # which takes later betas AND the eventual 2.0.0 stable.
+  #
+  # This said `^1.0.0` while the SDK was at 2.0.0-beta.3 -- an impossible
+  # constraint that went unnoticed because `dependency_overrides` below replaces
+  # the source outright and pub never has to satisfy it. Anyone copying this file
+  # as a starting point inherited the mistake, which is the reason to fix a line
+  # that has no effect on this repository's own build.
+  frappe_mobile_sdk: ^2.0.0-beta.3
 
 # For local development in this repository, uncomment this override:
 dependency_overrides:
