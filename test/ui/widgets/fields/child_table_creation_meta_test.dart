@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
-import 'package:frappe_mobile_sdk/src/ui/widgets/fields/child_table_field.dart';
 
 DocField _f(String n, String t) => DocField(fieldname: n, fieldtype: t);
 

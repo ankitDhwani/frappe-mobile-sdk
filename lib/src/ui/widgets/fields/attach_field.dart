@@ -24,6 +24,38 @@ import 'field_helpers.dart';
 // ImageField previews, with the same auth headers.
 import 'image_field.dart';
 
+/// Normalises the result of `FilePicker.pickFiles()` across the file_picker
+/// major versions this SDK supports (`>=11.0.2 <14.0.0`).
+///
+/// The shape changed without a source-compatible bridge:
+///   * **11.x / 12.x** return a nullable `FilePickerResult?` whose `.files` is
+///     the selection; `null` means the user cancelled.
+///   * **13.x** returns `List<PlatformFile>` directly; an empty list is cancel.
+///
+/// Dart has no conditional compilation, so one source file cannot statically
+/// typecheck against both. This function is the SINGLE point where the
+/// difference is absorbed: the argument is typed `Object?` so it accepts either
+/// static type, and every caller sees one shape. Widening the constraint
+/// WITHOUT this would compile here and fail at whichever end the consumer
+/// happens to resolve.
+///
+/// Deliberately tolerant: anything unrecognised reads as "no selection" rather
+/// than throwing, because a picker that cannot be interpreted must not take the
+/// form down — the field simply stays empty, which is the cancel path.
+List<Object?> pickedFilesOf(Object? raw) {
+  if (raw == null) return const [];
+  if (raw is List) return raw;
+  try {
+    final files = (raw as dynamic).files;
+    return files is List ? files : const [];
+  } on NoSuchMethodError {
+    // Not a shape this SDK knows. Caught NARROWLY — only the absent-getter
+    // case — so a genuine fault inside a real picker still surfaces instead of
+    // being silently swallowed as "user cancelled".
+    return const [];
+  }
+}
+
 /// Dedicated subdirectory (under the OS temp dir) holding attachments that were
 /// downloaded so an external app could open them. Keeping them in one folder
 /// instead of loose in the temp root makes the cache identifiable and lets the
@@ -291,12 +323,16 @@ class AttachField extends BaseField {
                             // guards `pickFiles` itself, which throws on a
                             // denied storage permission.
                             try {
-                              final result = await FilePicker.pickFiles();
-                              if (result == null ||
-                                  result.files.single.path == null) {
-                                return;
-                              }
-                              final picked = File(result.files.single.path!);
+                              // Normalised across the supported file_picker
+                              // major range — see [pickedFilesOf]. Cancel is an
+                              // empty list in both shapes.
+                              final files = pickedFilesOf(
+                                await FilePicker.pickFiles(),
+                              );
+                              if (files.isEmpty) return;
+                              final path = (files.single as dynamic).path;
+                              if (path is! String) return;
+                              final picked = File(path);
                               // Durable-copy-first; upload inline when online,
                               // else keep the local path for save-time queueing.
                               //

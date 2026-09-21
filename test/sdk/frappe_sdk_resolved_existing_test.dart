@@ -33,7 +33,7 @@ void main() {
       'http://x',
       db,
       onResolvedExisting: (doctype, uuid, existing, payload) =>
-          reported.add('$doctype/$uuid/' + (existing['name'] as String)),
+          reported.add('$doctype/$uuid/${existing['name'] as String}'),
       httpClient: MockClient((req) async {
         if (req.method == 'POST') {
           return http.Response(
