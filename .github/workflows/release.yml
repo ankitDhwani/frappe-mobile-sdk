@@ -69,7 +69,7 @@ jobs:
 
       - name: Setup semantic-release
         run: |
-          npm install semantic-release @semantic-release/git @semantic-release/exec @semantic-release/github @semantic-release/changelog @semantic-release/commit-analyzer @semantic-release/release-notes-generator --no-save
+          npm install semantic-release @semantic-release/git @semantic-release/exec @semantic-release/github @semantic-release/commit-analyzer @semantic-release/release-notes-generator --no-save
 
       - name: Configure Git
         run: |
