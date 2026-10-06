@@ -167,7 +167,10 @@ void main() {
     });
 
     test('a different scheme or port is a different origin', () {
-      expect(authHeadersForUrl('http://site.example.com/a', auth, base), isNull);
+      expect(
+        authHeadersForUrl('http://site.example.com/a', auth, base),
+        isNull,
+      );
       expect(
         authHeadersForUrl('https://site.example.com:8443/a', auth, base),
         isNull,
@@ -178,10 +181,13 @@ void main() {
       expect(authHeadersForUrl('https://SITE.example.com/a', auth, base), auth);
     });
 
-    test('without a base the origin cannot be checked: headers pass through', () {
-      expect(authHeadersForUrl('https://h/a', auth, null), auth);
-      expect(authHeadersForUrl('https://h/a', auth, '  '), auth);
-    });
+    test(
+      'without a base the origin cannot be checked: headers pass through',
+      () {
+        expect(authHeadersForUrl('https://h/a', auth, null), auth);
+        expect(authHeadersForUrl('https://h/a', auth, '  '), auth);
+      },
+    );
 
     test('null headers stay null', () {
       expect(authHeadersForUrl('$base/a', null, base), isNull);
