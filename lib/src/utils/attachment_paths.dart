@@ -152,6 +152,36 @@ String? frappeFileFetchUrl(String? path, String? baseUrl) {
   return '$baseNoSlash$p';
 }
 
+/// The auth [headers] to send with a request for [url], or null.
+///
+/// Auth headers (a Frappe session token) belong to the Frappe host only. A file
+/// value can be an absolute URL on another host — object storage or a CDN — and
+/// sending the token there leaks it to a third party. Object stores also reject
+/// a foreign `Authorization` header outright, so the file fails to load.
+///
+/// Returns [headers] when [url] is relative or has the same scheme, host and
+/// port as [baseUrl]; null for any other origin. Without a [baseUrl] the origin
+/// cannot be checked, so [headers] pass through unchanged.
+Map<String, String>? authHeadersForUrl(
+  String? url,
+  Map<String, String>? headers,
+  String? baseUrl,
+) {
+  if (headers == null) return null;
+  final base = baseUrl?.trim() ?? '';
+  if (base.isEmpty) return headers;
+  final target = Uri.tryParse(url?.trim() ?? '');
+  if (target == null) return null;
+  if (!target.hasScheme) return headers;
+  final origin = Uri.tryParse(base);
+  if (origin == null || !origin.hasScheme) return headers;
+  final sameOrigin =
+      target.scheme.toLowerCase() == origin.scheme.toLowerCase() &&
+      target.host.toLowerCase() == origin.host.toLowerCase() &&
+      target.port == origin.port;
+  return sameOrigin ? headers : null;
+}
+
 /// Extension → MIME type for the attachment kinds a Frappe mobile form
 /// realistically carries.
 ///
