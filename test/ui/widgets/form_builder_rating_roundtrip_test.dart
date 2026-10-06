@@ -48,18 +48,19 @@ Future<void Function()> _pumpForm(
 void main() {
   for (final mode in FormBuilderMode.values) {
     group('Rating in a $mode form', () {
-      testWidgets('a saved 0.6 still shows 3 of 5 stars after the form settles', (
-        tester,
-      ) async {
-        await _pumpForm(
-          tester,
-          mode: mode,
-          initialData: {'score': 0.6},
-          onSubmit: (_) {},
-        );
-        expect(find.byIcon(Icons.star), findsNWidgets(3));
-        expect(find.byIcon(Icons.star_border), findsNWidgets(2));
-      });
+      testWidgets(
+        'a saved 0.6 still shows 3 of 5 stars after the form settles',
+        (tester) async {
+          await _pumpForm(
+            tester,
+            mode: mode,
+            initialData: {'score': 0.6},
+            onSubmit: (_) {},
+          );
+          expect(find.byIcon(Icons.star), findsNWidgets(3));
+          expect(find.byIcon(Icons.star_border), findsNWidgets(2));
+        },
+      );
 
       testWidgets('a saved fraction submits unchanged when untouched', (
         tester,

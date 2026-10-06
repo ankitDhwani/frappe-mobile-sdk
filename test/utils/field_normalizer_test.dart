@@ -85,8 +85,14 @@ void main() {
       expect(FieldNormalizer.normalize(_f(FieldTypes.rating), '0.6'), 0.6);
     });
     test('always yields a double, the type RatingField holds', () {
-      expect(FieldNormalizer.normalize(_f(FieldTypes.rating), 4), isA<double>());
-      expect(FieldNormalizer.normalize(_f(FieldTypes.rating), 0.6), isA<double>());
+      expect(
+        FieldNormalizer.normalize(_f(FieldTypes.rating), 4),
+        isA<double>(),
+      );
+      expect(
+        FieldNormalizer.normalize(_f(FieldTypes.rating), 0.6),
+        isA<double>(),
+      );
     });
     test('a non-numeric value becomes null', () {
       expect(FieldNormalizer.normalize(_f(FieldTypes.rating), 'abc'), isNull);
