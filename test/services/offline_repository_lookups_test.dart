@@ -300,7 +300,11 @@ void main() {
           isTable: false,
           fields: [
             DocField(fieldname: 'title', fieldtype: 'Data'),
-            DocField(fieldname: 'items', fieldtype: 'Table', options: 'Order Item'),
+            DocField(
+              fieldname: 'items',
+              fieldtype: 'Table',
+              options: 'Order Item',
+            ),
             DocField(
               fieldname: 'returned_items',
               fieldtype: 'Table',
