@@ -3,6 +3,7 @@
 
 import 'dart:io';
 import 'package:path/path.dart' as p;
+import '../utils/image_downscale.dart';
 import 'rest_helper.dart';
 import 'utils.dart';
 
@@ -47,14 +48,18 @@ class AttachmentService {
     // an SVG; the server then shrinks it to at most 1024x768 at quality 85 and
     // keeps the smaller copy (frappe/handler.py `upload_file`,
     // frappe/utils/image.py `optimize_image`). [optimize] overrides the
-    // default the way Desk's per-file toggle does. The flag is only ever sent
+    // default the way Desk's per-file toggle does,
+    // and [ImageUploadSettings.serverOptimize] does so app-wide. The flag is only ever sent
     // as true: the server treats any non-empty value as true.
     final name = fileName ?? file.path;
     final isImage = _optimisableImageExtensions.contains(
       p.extension(name).toLowerCase(),
     );
+    // Per call, then app-wide (ImageUploadSettings.serverOptimize), then Desk.
     final wantOptimise =
-        optimize ?? (await file.length() > _deskOptimiseThresholdBytes);
+        optimize ??
+        ImageUploadSettings.serverOptimize ??
+        (await file.length() > _deskOptimiseThresholdBytes);
     if (isImage && wantOptimise) {
       fields['optimize'] = 'true';
     }

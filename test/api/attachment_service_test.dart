@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:frappe_mobile_sdk/src/api/attachment_service.dart';
 import 'package:frappe_mobile_sdk/src/api/rest_helper.dart';
+import 'package:frappe_mobile_sdk/src/utils/image_downscale.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
 class _MemoryPathProvider extends PathProviderPlatform {
@@ -260,6 +261,26 @@ void main() {
       expect(
         (await fieldsFor('photo.jpg', under, optimize: true))['optimize'],
         'true',
+      );
+    });
+
+    test('the app-wide setting replaces Desk\'s rule', () async {
+      addTearDown(ImageUploadSettings.reset);
+      ImageUploadSettings.serverOptimize = false;
+      expect(
+        (await fieldsFor('photo.jpg', over)).containsKey('optimize'),
+        isFalse,
+      );
+      ImageUploadSettings.serverOptimize = true;
+      expect((await fieldsFor('photo.jpg', under))['optimize'], 'true');
+      // A per-call value still wins over the app-wide one.
+      expect(
+        (await fieldsFor(
+          'photo.jpg',
+          under,
+          optimize: false,
+        )).containsKey('optimize'),
+        isFalse,
       );
     });
 

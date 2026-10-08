@@ -12,6 +12,7 @@ import '../../../sync/attachment_error_classifier.dart';
 import '../../../utils/attachment_paths.dart';
 import '../../../utils/media_store.dart';
 import '../../../utils/attachment_pick.dart';
+import '../../../utils/image_downscale.dart';
 import '../../../utils/sdk_log.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
@@ -239,6 +240,10 @@ class ImageField extends BaseField {
     File file, {
     ScaffoldMessengerState? messenger,
   }) async {
+    // Opt-in size limit (ImageUploadSettings.captureLimits); a no-op unless the
+    // host app turned it on. Runs before the durable copy, so the smaller file
+    // is what gets staged and uploaded, online or offline.
+    file = await preparePickedImage(file);
     // Durable-copy-first (survives camera-process kill / cache reclaim); upload
     // inline when online, else keep the local path for save-time queueing.
     //
