@@ -89,6 +89,46 @@ http.Request? mediaFetchRequest(
     ..headers.addAll(authHeadersForUrl(url, headers, baseUrl) ?? const {});
 }
 
+/// What the media resolver's fetcher downloads for a file [value]: the body of
+/// [mediaFetchRequest], capped at [cap] bytes, or null when the value is not a
+/// fetchable URL, the server refuses it, or the fetch fails.
+///
+/// [newClient] is a test seam; each fetch gets its own client, closed once the
+/// body has been read.
+@visibleForTesting
+Future<List<int>?> fetchMediaBytes(
+  String value, {
+  required String? baseUrl,
+  required Map<String, String> headers,
+  http.Client Function() newClient = http.Client.new,
+  int cap = kDefaultMaxMediaFetchBytes,
+}) async {
+  if (frappeFileFetchUrl(value, baseUrl)?.startsWith('http') != true) {
+    return null;
+  }
+  http.Client? client;
+  try {
+    final request = mediaFetchRequest(
+      value,
+      baseUrl: baseUrl,
+      headers: headers,
+    )!;
+    client = newClient();
+    final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+
+    // Awaited: returning the future from inside `try` would let `finally`
+    // close the client while the body is still streaming, and an error from
+    // the read would escape the `catch`.
+    return await readCappedMediaBody(res, cap: cap, label: value);
+  } catch (e, st) {
+    sdkLog('fetchMediaBytes($value) failed — $e\n$st');
+    return null;
+  } finally {
+    client?.close();
+  }
+}
+
 @visibleForTesting
 Future<List<int>?> readCappedMediaBody(
   http.StreamedResponse res, {
@@ -418,28 +458,11 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   Future<List<int>?> _fetchMediaBytes(String value) async {
     final api = widget.api;
     if (api == null) return null;
-    if (frappeFileFetchUrl(value, api.baseUrl)?.startsWith('http') != true) {
-      return null;
-    }
-    const cap = kDefaultMaxMediaFetchBytes;
-    http.Client? client;
-    try {
-      final request = mediaFetchRequest(
-        value,
-        baseUrl: api.baseUrl,
-        headers: api.requestHeaders,
-      )!;
-      client = http.Client();
-      final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
-      if (res.statusCode < 200 || res.statusCode >= 300) return null;
-
-      return readCappedMediaBody(res, cap: cap, label: value);
-    } catch (e, st) {
-      sdkLog('FormScreen._fetchMediaBytes($value) failed — $e\n$st');
-      return null;
-    } finally {
-      client?.close();
-    }
+    return fetchMediaBytes(
+      value,
+      baseUrl: api.baseUrl,
+      headers: api.requestHeaders,
+    );
   }
 
   void _buildMediaResolver() {
