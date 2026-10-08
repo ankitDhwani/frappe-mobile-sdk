@@ -1164,6 +1164,20 @@ client.doctype.getByName(doctype, name);
 
 // File Upload
 client.attachment.uploadFile(file, doctype: 'Customer', docname: 'CUST-001');
+// Images over 200 KB (not SVG) are sent with optimize=true, as Frappe Desk
+// does, so the server stores a copy shrunk to at most 1024x768. Pass
+// `optimize: false` to keep the original, or `true` to force it.
+
+// Opt-in, app-wide: shrink photos on the device before they are stored or
+// uploaded (faster uploads on slow networks). Off by default.
+ImageUploadSettings.captureLimits = const ImageCaptureLimits();
+// Photos are reduced by a whole factor (exact pixel averaging, no resampling
+// artefacts) while keeping the long edge at 1920 px or more, then saved as
+// JPEG quality 92. Camera rotation is applied; other EXIF (time, GPS) is kept.
+// A 12 MP photo becomes about 2000x1500; 8 MP and smaller are left as they are.
+// When photos are already sized on the device, you may not want the server to
+// shrink them again to 1024x768:
+ImageUploadSettings.serverOptimize = false;
 
 // Query Builder
 client.doc('ToDo').where('status', 'Open').get();
