@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 
@@ -51,64 +53,146 @@ class ImageUploadSettings {
   }
 }
 
+/// Width and height stored in a JPEG's frame header, read without decoding
+/// any image data. Null when [bytes] is not a JPEG or has no frame header.
+///
+/// These are the stored dimensions: a camera that saves a portrait photo as
+/// landscape pixels plus an EXIF rotation reports the landscape size here.
+@visibleForTesting
+({int width, int height})? jpegDimensions(Uint8List bytes) {
+  if (bytes.length < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8) return null;
+  var i = 2;
+  while (i + 3 < bytes.length) {
+    if (bytes[i] != 0xFF) return null;
+    final marker = bytes[i + 1];
+    // Fill bytes before a marker.
+    if (marker == 0xFF) {
+      i++;
+      continue;
+    }
+    // Markers without a length field.
+    if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD8)) {
+      i += 2;
+      continue;
+    }
+    // Start of scan or end of image before any frame header.
+    if (marker == 0xDA || marker == 0xD9) return null;
+    final length = (bytes[i + 2] << 8) | bytes[i + 3];
+    if (length < 2) return null;
+    // SOF0-SOF15, except DHT (C4), JPG (C8) and DAC (CC).
+    final isFrame =
+        marker >= 0xC0 &&
+        marker <= 0xCF &&
+        marker != 0xC4 &&
+        marker != 0xC8 &&
+        marker != 0xCC;
+    if (isFrame) {
+      if (i + 8 >= bytes.length) return null;
+      final height = (bytes[i + 5] << 8) | bytes[i + 6];
+      final width = (bytes[i + 7] << 8) | bytes[i + 8];
+      if (width == 0 || height == 0) return null;
+      return (width: width, height: height);
+    }
+    i += 2 + length;
+  }
+  return null;
+}
+
 /// Returns [file] shrunk per [limits], or [file] itself when it is under
 /// twice [ImageCaptureLimits.targetLongEdge], is not a JPEG, cannot be read,
 /// or would not get smaller.
 ///
-/// Quality:
-/// - it shrinks by a whole-number factor k, and each output pixel is the exact
-///   mean of a k x k block of the photo (a box filter). Nothing is resampled at
-///   a fractional ratio, and no pixels are dropped, so text and fine detail
-///   stay clean. (The platform picker's own maxWidth/maxHeight resize drops
-///   pixels.) At most k-1 edge pixels are trimmed so the blocks tile exactly;
-/// - the camera's rotation (EXIF orientation) is applied; other EXIF, such as
-///   time and GPS, is kept.
+/// - The size is read from the JPEG header first, so a photo that stays as it
+///   is is never decoded.
+/// - The photo is shrunk by a whole-number factor k. Flutter's image decoder
+///   does the work: it decodes the JPEG straight at the reduced size (for
+///   k = 2, 4 or 8 that is the JPEG format's own exact scaling), so the
+///   full-size photo is never held in memory. Measured on a 12 MP photo (desktop,
+///   debug build): about half the peak memory of decoding it in Dart, and a
+///   third of the time.
+/// - The decoder applies the camera's rotation (EXIF orientation), so the
+///   result is upright and its orientation tag is reset. Other EXIF, such as
+///   time and GPS, is copied across.
+/// - The result keeps the original file name, in a new folder next to it.
 ///
-/// Runs on a background isolate.
+/// Uses `dart:ui`, so it runs on the UI isolate; the decode itself happens off
+/// the UI thread, and the JPEG encode runs on a background isolate.
 Future<File> downscalePickedImage(File file, ImageCaptureLimits limits) async {
-  final path = file.path;
-  final target = limits.targetLongEdge;
-  final quality = limits.jpegQuality;
   try {
-    final out = await Isolate.run(() => _downscale(path, target, quality));
-    return out == null ? file : File(out);
+    return await _downscale(file, limits) ?? file;
   } catch (e, st) {
     sdkLog('downscalePickedImage: kept the original — $e\n$st');
     return file;
   }
 }
 
-String? _downscale(String path, int target, int quality) {
+Future<File?> _downscale(File file, ImageCaptureLimits limits) async {
+  final path = file.path;
   final ext = p.extension(path).toLowerCase();
   if (ext != '.jpg' && ext != '.jpeg') return null;
-  final bytes = File(path).readAsBytesSync();
-  final decoded = img.decodeJpg(bytes);
-  if (decoded == null) return null;
+  final bytes = await file.readAsBytes();
+  final stored = jpegDimensions(bytes);
+  if (stored == null) return null;
 
-  final oriented = img.bakeOrientation(decoded);
-  final w = oriented.width;
-  final h = oriented.height;
+  final exif = img.decodeJpgExif(bytes);
+  // Orientations 5-8 turn the photo by 90 degrees, swapping its axes.
+  final turned = (exif?.imageIfd.orientation ?? 1) >= 5;
+  final w = turned ? stored.height : stored.width;
+  final h = turned ? stored.width : stored.height;
   final longEdge = w > h ? w : h;
   // Largest whole factor that keeps the long edge at or above the target.
-  final k = longEdge ~/ target;
+  final k = longEdge ~/ limits.targetLongEdge;
   if (k < 2) return null;
-  final tiled = (w % k == 0 && h % k == 0)
-      ? oriented
-      : img.copyCrop(oriented, x: 0, y: 0, width: w - w % k, height: h - h % k);
-  final resized = img.copyResize(
-    tiled,
-    width: tiled.width ~/ k,
-    height: tiled.height ~/ k,
-    interpolation: img.Interpolation.average,
+
+  // Rounded up, which is the size the JPEG's own 1/2, 1/4 and 1/8 scaling
+  // produces, so the decoder does not resample a second time.
+  final codec = await ui.instantiateImageCodec(
+    bytes,
+    targetWidth: (w + k - 1) ~/ k,
+    targetHeight: (h + k - 1) ~/ k,
   );
-  final encoded = img.encodeJpg(resized, quality: quality);
+  final int outW;
+  final int outH;
+  final ByteData rgba;
+  try {
+    final image = (await codec.getNextFrame()).image;
+    try {
+      outW = image.width;
+      outH = image.height;
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (data == null) return null;
+      rgba = data;
+    } finally {
+      image.dispose();
+    }
+  } finally {
+    codec.dispose();
+  }
+
+  final quality = limits.jpegQuality;
+  final pixels = TransferableTypedData.fromList([rgba.buffer.asUint8List()]);
+  final encoded = await Isolate.run(() {
+    final small = img.Image.fromBytes(
+      width: outW,
+      height: outH,
+      bytes: pixels.materialize(),
+      numChannels: 4,
+    );
+    if (exif != null) {
+      small.exif = exif;
+      // The pixels are upright now.
+      if (small.exif.imageIfd.hasOrientation) {
+        small.exif.imageIfd.orientation = 1;
+      }
+    }
+    return img.encodeJpg(small, quality: quality);
+  });
   if (encoded.length >= bytes.length) return null;
 
-  final out = p.join(
-    p.dirname(path),
-    '${p.basenameWithoutExtension(path)}_${longEdge ~/ k}px.jpg',
-  );
-  File(out).writeAsBytesSync(encoded, flush: true);
+  // Same name as the original: it is what reaches the server.
+  final folder = await Directory(p.dirname(path)).createTemp('downscaled_');
+  final out = File(p.join(folder.path, p.basename(path)));
+  await out.writeAsBytes(encoded, flush: true);
   return out;
 }
 

@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/src/utils/image_downscale.dart';
@@ -10,6 +11,8 @@ import 'package:image/image.dart' as img;
 /// on, a picked photo is shrunk on the device before it is staged or
 /// uploaded, without visibly lowering its quality.
 void main() {
+  // The shrink decodes with Flutter's image decoder (dart:ui).
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory dir;
 
   setUp(() async {
@@ -68,11 +71,12 @@ void main() {
   test(
     'a 12 MP photo is halved (largest whole factor keeping >= 1920 px)',
     () async {
-      // Whole-number factors only: each output pixel is the exact mean of a
-      // k x k block, so nothing is resampled at an awkward fraction.
+      // Whole-number factors only, so the JPEG's own 1/2 scaling does the
+      // work and nothing is resampled at an awkward fraction.
       final src = await jpeg('land.jpg', 4000, 3000);
       final out = await downscalePickedImage(src, limits);
       expect(out.path, isNot(src.path));
+      expect(src.existsSync(), isTrue, reason: 'the original is left alone');
       final o = read(out);
       expect([o.width, o.height], [2000, 1500]);
       expect(out.lengthSync(), lessThan(src.lengthSync()));
@@ -80,11 +84,11 @@ void main() {
   );
 
   test('a much larger photo uses a larger factor', () async {
-    // 6000 / 1920 allows a factor of 3 (2000 px).
+    // 6000 / 1920 allows a factor of 3 (2000 px); sizes round up.
     final o = read(
       await downscalePickedImage(await jpeg('big.jpg', 6000, 4000), limits),
     );
-    expect([o.width, o.height], [2000, 1333]);
+    expect([o.width, o.height], [2000, 1334]);
   });
 
   test('a portrait photo keeps its aspect ratio', () async {
@@ -141,10 +145,26 @@ void main() {
   });
 
   test('camera rotation (EXIF orientation) is applied, not lost', () async {
-    // Stored 4000x3000 with "rotate 90" = shown as a 3000x4000 portrait.
-    final src = await jpeg('rot.jpg', 4000, 3000, orientation: 6);
+    // Stored 4000x3000 with "rotate 90" = shown as a 3000x4000 portrait. The
+    // stored left half is red, so the upright photo's TOP half is red.
+    final src = await jpeg(
+      'rot.jpg',
+      4000,
+      3000,
+      orientation: 6,
+      paint: (i) {
+        for (final p in i) {
+          p
+            ..r = p.x < 2000 ? 255 : 0
+            ..g = 0
+            ..b = p.x < 2000 ? 0 : 255;
+        }
+      },
+    );
     final o = read(await downscalePickedImage(src, limits));
     expect([o.width, o.height], [1500, 2000]);
+    expect(o.getPixel(750, 400).r, greaterThan(200), reason: 'top is red');
+    expect(o.getPixel(750, 1600).b, greaterThan(200), reason: 'bottom blue');
     expect(
       !o.exif.imageIfd.hasOrientation || o.exif.imageIfd.orientation == 1,
       isTrue,
@@ -197,6 +217,39 @@ void main() {
       expect((await downscalePickedImage(src, limits)).path, src.path);
     },
   );
+
+  test('the shrunk photo keeps the original file name', () async {
+    // The name is what the server stores; a `_2000px` suffix leaked into it.
+    for (final name in ['IMG_123.jpg', 'scan.JPEG']) {
+      final src = await jpeg(name, 4000, 3000);
+      final out = await downscalePickedImage(src, limits);
+      expect(out.path, isNot(src.path));
+      expect(out.uri.pathSegments.last, name);
+    }
+  });
+
+  group('jpegDimensions reads the frame header only', () {
+    test('baseline JPEG, including one with EXIF before the frame', () async {
+      final plain = await jpeg('a.jpg', 640, 480);
+      expect(jpegDimensions(plain.readAsBytesSync()), (
+        width: 640,
+        height: 480,
+      ));
+      final tagged = await jpeg('b.jpg', 640, 480, orientation: 6);
+      expect(
+        jpegDimensions(tagged.readAsBytesSync()),
+        (width: 640, height: 480),
+        reason: 'stored size; the rotation is applied later',
+      );
+    });
+
+    test('not a JPEG, or cut short: null', () {
+      expect(jpegDimensions(Uint8List.fromList([1, 2, 3, 4, 5])), isNull);
+      expect(jpegDimensions(Uint8List.fromList([0xFF, 0xD8, 0xFF])), isNull);
+      final png = img.encodePng(img.Image(width: 8, height: 8));
+      expect(jpegDimensions(png), isNull);
+    });
+  });
 
   group('preparePickedImage (what ImageField runs on every pick)', () {
     test('with no limits set, the picked file is used as is', () async {
