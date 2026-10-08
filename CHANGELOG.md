@@ -26,9 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Saving wrote the union back under each field, the duplication grew with every edit, and it reached the server on the next push.
   - The read now filters by `parentfield` too, as the server's `load_children_from_db` and every other child-row read and write in the SDK already do.
 - **The session token was sent to whatever host a file URL named.**
-  - `ImageField` (preview and full-screen view) and `AttachField` (view button) passed `imageHeaders` with every file request. A file value can be an absolute URL on object storage or a CDN, so the token reached a third party.
+  - `ImageField` (preview and full-screen view), `AttachField` (view button) and the media resolver's fetcher in `FormScreen` sent the session headers with every file request. A file value can be an absolute URL on object storage or a CDN, so the token reached a third party. The fetcher runs first whenever a form opens online, so it was the main path.
   - Object stores also reject a foreign `Authorization` header, which made those files fail with HTTP 400.
-  - New `authHeadersForUrl` keeps the headers for relative URLs and for URLs whose scheme, host and port match `fileUrlBase`, and drops them otherwise. With no `fileUrlBase` the origin can't be checked, and the headers pass through as before.
+  - New `authHeadersForUrl` keeps the headers for relative URLs and for URLs whose scheme, host and port match `fileUrlBase`, and drops them otherwise. A protocol-relative URL (`//host/x`) is compared with the base's scheme. With no `fileUrlBase` the origin can't be checked, and the headers pass through as before.
 
 ### Changed
 
