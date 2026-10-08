@@ -71,6 +71,24 @@ const Duration _mediaFetchStallTimeout = Duration(seconds: 30);
 /// so before this bound a stalled stream left the resolve future permanently
 /// unresolved and the widget stuck on a spinner. `AttachField`'s own downloader
 /// already guarded this the same way (`_AttachViewButtonState.stallTimeout`).
+/// The GET request the media resolver's fetcher sends for a file [value], or
+/// null when the value is not a fetchable URL.
+///
+/// The session [headers] go to the Frappe origin only ([authHeadersForUrl]). A
+/// file value can be an absolute URL on object storage or a CDN; sending the
+/// token there leaks it to a third party, and the store rejects the request.
+@visibleForTesting
+http.Request? mediaFetchRequest(
+  String value, {
+  required String? baseUrl,
+  required Map<String, String> headers,
+}) {
+  final url = frappeFileFetchUrl(value, baseUrl);
+  if (url == null || !url.startsWith('http')) return null;
+  return http.Request('GET', Uri.parse(url))
+    ..headers.addAll(authHeadersForUrl(url, headers, baseUrl) ?? const {});
+}
+
 @visibleForTesting
 Future<List<int>?> readCappedMediaBody(
   http.StreamedResponse res, {
@@ -400,14 +418,18 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   Future<List<int>?> _fetchMediaBytes(String value) async {
     final api = widget.api;
     if (api == null) return null;
-    final url = frappeFileFetchUrl(value, api.baseUrl);
-    if (url == null || !url.startsWith('http')) return null;
+    if (frappeFileFetchUrl(value, api.baseUrl)?.startsWith('http') != true) {
+      return null;
+    }
     const cap = kDefaultMaxMediaFetchBytes;
     http.Client? client;
     try {
+      final request = mediaFetchRequest(
+        value,
+        baseUrl: api.baseUrl,
+        headers: api.requestHeaders,
+      )!;
       client = http.Client();
-      final request = http.Request('GET', Uri.parse(url))
-        ..headers.addAll(api.requestHeaders);
       final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
       if (res.statusCode < 200 || res.statusCode >= 300) return null;
 
