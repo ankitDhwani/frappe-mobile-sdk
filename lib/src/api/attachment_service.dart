@@ -44,22 +44,22 @@ class AttachmentService {
       'folder': 'Home',
     };
 
-    // Frappe Desk asks the server to optimise an image over 200 KB that is not
-    // an SVG; the server then shrinks it to at most 1024x768 at quality 85 and
-    // keeps the smaller copy (frappe/handler.py `upload_file`,
-    // frappe/utils/image.py `optimize_image`). [optimize] overrides the
-    // default the way Desk's per-file toggle does,
-    // and [ImageUploadSettings.serverOptimize] does so app-wide. The flag is only ever sent
-    // as true: the server treats any non-empty value as true.
+    // Frappe's `upload_file` stores the file as sent unless the client asks it
+    // to optimise; then it shrinks an image to at most 1024x768 at quality 85
+    // and keeps the smaller copy (frappe/handler.py `upload_file`,
+    // frappe/utils/image.py `optimize_image`). Off by default, as in the API.
+    // [ImageUploadSettings.serverOptimize] opts in to Desk's rule (an image
+    // over 200 KB that is not an SVG); [optimize] forces it on or off for one
+    // upload, like Desk's per-file toggle. The flag is only ever sent as true:
+    // the server treats any non-empty value as true.
     final name = fileName ?? file.path;
     final isImage = _optimisableImageExtensions.contains(
       p.extension(name).toLowerCase(),
     );
-    // Per call, then app-wide (ImageUploadSettings.serverOptimize), then Desk.
     final wantOptimise =
         optimize ??
-        ImageUploadSettings.serverOptimize ??
-        (await file.length() > _deskOptimiseThresholdBytes);
+        (ImageUploadSettings.serverOptimize &&
+            await file.length() > _deskOptimiseThresholdBytes);
     if (isImage && wantOptimise) {
       fields['optimize'] = 'true';
     }

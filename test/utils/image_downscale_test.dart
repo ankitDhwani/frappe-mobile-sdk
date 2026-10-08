@@ -62,7 +62,7 @@ void main() {
 
   test('off by default: no limits, Frappe behaviour', () {
     expect(ImageUploadSettings.captureLimits, isNull);
-    expect(ImageUploadSettings.serverOptimize, isNull);
+    expect(ImageUploadSettings.serverOptimize, isFalse);
   });
 
   test(

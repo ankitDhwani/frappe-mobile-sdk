@@ -193,12 +193,12 @@ void main() {
       expect(partFilename, 'Site Photo.jpg');
     },
   );
-  // Frappe Desk asks the server to optimise an image upload when the image is
-  // over 200 KB and not an SVG (file_uploader/FileUploader.vue: `optimize:
-  // size_kb > 200 && is_image && !svg`, sent as `optimize=true`). The server
-  // then shrinks it to at most 1024x768 at quality 85 and keeps whichever copy
-  // is smaller (frappe/handler.py upload_file, frappe/utils/image.py).
-  group('optimize, as Frappe Desk sends it', () {
+  // Frappe's `upload_file` optimises an image only when the client sends
+  // `optimize` (frappe/handler.py). Desk's uploader sends it for an image over
+  // 200 KB that is not an SVG (file_uploader/FileUploader.vue: `optimize:
+  // size_kb > 200 && is_image && !svg`). The SDK sends nothing unless the app
+  // opts in to Desk's rule, or a caller asks for one upload.
+  group('optimize: off unless asked, Desk\'s rule when opted in', () {
     Future<Map<String, String>> fieldsFor(
       String name,
       int bytes, {
@@ -226,61 +226,61 @@ void main() {
     const over = 201 * 1024;
     const under = 200 * 1024;
 
-    test('an image over 200 KB asks for optimize', () async {
-      expect((await fieldsFor('photo.jpg', over))['optimize'], 'true');
-      expect((await fieldsFor('scan.PNG', over))['optimize'], 'true');
+    tearDown(ImageUploadSettings.reset);
+
+    test(
+      'by default nothing is sent: the file is stored as uploaded',
+      () async {
+        expect(ImageUploadSettings.serverOptimize, isFalse);
+        expect(
+          (await fieldsFor('photo.jpg', over)).containsKey('optimize'),
+          isFalse,
+        );
+      },
+    );
+
+    group('with serverOptimize on (Desk\'s rule)', () {
+      setUp(() => ImageUploadSettings.serverOptimize = true);
+
+      test('an image over 200 KB asks for optimize', () async {
+        expect((await fieldsFor('photo.jpg', over))['optimize'], 'true');
+        expect((await fieldsFor('scan.PNG', over))['optimize'], 'true');
+      });
+
+      test('an image of 200 KB or less does not', () async {
+        expect(
+          (await fieldsFor('photo.jpg', under)).containsKey('optimize'),
+          isFalse,
+        );
+      });
+
+      test('SVG and non-images never do', () async {
+        expect(
+          (await fieldsFor('logo.svg', over)).containsKey('optimize'),
+          isFalse,
+        );
+        expect(
+          (await fieldsFor('report.pdf', over)).containsKey('optimize'),
+          isFalse,
+        );
+      });
+
+      test('a per-call false still wins', () async {
+        expect(
+          (await fieldsFor(
+            'photo.jpg',
+            over,
+            optimize: false,
+          )).containsKey('optimize'),
+          isFalse,
+        );
+      });
     });
 
-    test('an image of 200 KB or less does not', () async {
-      expect(
-        (await fieldsFor('photo.jpg', under)).containsKey('optimize'),
-        isFalse,
-      );
-    });
-
-    test('SVG and non-images never do', () async {
-      expect(
-        (await fieldsFor('logo.svg', over)).containsKey('optimize'),
-        isFalse,
-      );
-      expect(
-        (await fieldsFor('report.pdf', over)).containsKey('optimize'),
-        isFalse,
-      );
-    });
-
-    test('the caller can turn it off, or on, like the Desk toggle', () async {
-      expect(
-        (await fieldsFor(
-          'photo.jpg',
-          over,
-          optimize: false,
-        )).containsKey('optimize'),
-        isFalse,
-      );
+    test('a per-call true forces it, like the Desk toggle', () async {
       expect(
         (await fieldsFor('photo.jpg', under, optimize: true))['optimize'],
         'true',
-      );
-    });
-
-    test('the app-wide setting replaces Desk\'s rule', () async {
-      addTearDown(ImageUploadSettings.reset);
-      ImageUploadSettings.serverOptimize = false;
-      expect(
-        (await fieldsFor('photo.jpg', over)).containsKey('optimize'),
-        isFalse,
-      );
-      ImageUploadSettings.serverOptimize = true;
-      expect((await fieldsFor('photo.jpg', under))['optimize'], 'true');
-      // A per-call value still wins over the app-wide one.
-      expect(
-        (await fieldsFor(
-          'photo.jpg',
-          under,
-          optimize: false,
-        )).containsKey('optimize'),
-        isFalse,
       );
     });
 

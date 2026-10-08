@@ -33,16 +33,21 @@ class ImageUploadSettings {
   /// default) keeps Frappe's behaviour: the original file is uploaded.
   static ImageCaptureLimits? captureLimits;
 
-  /// Whether uploads ask the server to optimise images. Null (the default)
-  /// follows Frappe Desk: an image over 200 KB that is not an SVG. Set false to
-  /// keep the uploaded photo as sent, e.g. when [captureLimits] already sized
-  /// it and a second, server-side shrink to 1024x768 is not wanted.
-  static bool? serverOptimize;
+  /// Ask the server to optimise uploaded images, the way Frappe Desk's uploader
+  /// does by default: an image over 200 KB that is not an SVG is sent with
+  /// `optimize`, and the server stores a copy fitted into 1024x768 at quality
+  /// 85. False (the default) uploads the file as it is, which is what Frappe's
+  /// `upload_file` API does when the client does not ask.
+  ///
+  /// Do not combine with [captureLimits]: the server's resize ignores the EXIF
+  /// rotation, so a portrait photo already turned upright on the device is cut
+  /// to 512x768.
+  static bool serverOptimize = false;
 
   /// Restores the defaults (for tests).
   static void reset() {
     captureLimits = null;
-    serverOptimize = null;
+    serverOptimize = false;
   }
 }
 
