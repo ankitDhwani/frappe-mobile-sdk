@@ -1164,6 +1164,9 @@ client.doctype.getByName(doctype, name);
 
 // File Upload
 client.attachment.uploadFile(file, doctype: 'Customer', docname: 'CUST-001');
+// Images over 200 KB (not SVG) are sent with optimize=true, as Frappe Desk
+// does, so the server stores a copy shrunk to at most 1024x768. Pass
+// `optimize: false` to keep the original, or `true` to force it.
 
 // Query Builder
 client.doc('ToDo').where('status', 'Open').get();
