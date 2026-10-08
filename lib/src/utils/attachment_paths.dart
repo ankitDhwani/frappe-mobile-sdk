@@ -160,7 +160,8 @@ String? frappeFileFetchUrl(String? path, String? baseUrl) {
 /// a foreign `Authorization` header outright, so the file fails to load.
 ///
 /// Returns [headers] when [url] is relative or has the same scheme, host and
-/// port as [baseUrl]; null for any other origin. Without a [baseUrl] the origin
+/// port as [baseUrl]; null for any other origin. A protocol-relative URL
+/// (`//host/x`) is compared using the base's scheme. Without a [baseUrl] the origin
 /// cannot be checked, so [headers] pass through unchanged.
 Map<String, String>? authHeadersForUrl(
   String? url,
@@ -170,11 +171,15 @@ Map<String, String>? authHeadersForUrl(
   if (headers == null) return null;
   final base = baseUrl?.trim() ?? '';
   if (base.isEmpty) return headers;
-  final target = Uri.tryParse(url?.trim() ?? '');
+  var target = Uri.tryParse(url?.trim() ?? '');
   if (target == null) return null;
-  if (!target.hasScheme) return headers;
+  // A relative path resolves against the base, so it is same-origin.
+  if (!target.hasScheme && target.host.isEmpty) return headers;
   final origin = Uri.tryParse(base);
   if (origin == null || !origin.hasScheme) return headers;
+  // A protocol-relative URL (`//cdn.example.com/x.jpg`) names a host: give it
+  // the site's scheme and compare it like any absolute URL.
+  if (!target.hasScheme) target = origin.resolveUri(target);
   final sameOrigin =
       target.scheme.toLowerCase() == origin.scheme.toLowerCase() &&
       target.host.toLowerCase() == origin.host.toLowerCase() &&

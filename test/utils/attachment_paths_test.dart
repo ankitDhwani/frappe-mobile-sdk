@@ -192,5 +192,20 @@ void main() {
     test('null headers stay null', () {
       expect(authHeadersForUrl('$base/a', null, base), isNull);
     });
+
+    test('a protocol-relative URL names another host: no headers', () {
+      expect(authHeadersForUrl('//cdn.example.com/x.jpg', auth, base), isNull);
+      expect(
+        authHeadersForUrl('//bucket.s3.amazonaws.com/a.pdf', auth, base),
+        isNull,
+      );
+    });
+
+    test('a protocol-relative URL to the Frappe host itself keeps them', () {
+      expect(
+        authHeadersForUrl('//site.example.com/files/a.png', auth, base),
+        auth,
+      );
+    });
   });
 }
