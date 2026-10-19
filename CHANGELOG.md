@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ImageField` (preview and full-screen view), `AttachField` (view button) and the media resolver's fetcher in `FormScreen` sent the session headers with every file request. A file value can be an absolute URL on object storage or a CDN, so the token reached a third party. The fetcher runs first whenever a form opens online, so it was the main path.
   - Object stores also reject a foreign `Authorization` header, which made those files fail with HTTP 400.
   - New `authHeadersForUrl` keeps the headers for relative URLs and for URLs whose scheme, host and port match `fileUrlBase`, and drops them otherwise. A protocol-relative URL (`//host/x`) is compared with the base's scheme. With no `fileUrlBase` the origin can't be checked, and the headers pass through as before.
+- **Saving while a picked photo is still uploading no longer drops the photo.** An image field's pick, shrink and upload run after the tap, so a form saved in that window read the field from before the photo landed and stored the record without it (or with the previous photo). `FrappeFormBuilder` now waits for that work to finish before it reads the values, in legacy and reactive mode, and in the row form of a child table.
+  - A second Save press while it waits is ignored, so the record is saved once.
+  - A photo that fails to upload does not block the save: the wait ends and the form saves as the field stands.
+  - A form with nothing uploading saves at once, as before.
 
 ### Changed
 

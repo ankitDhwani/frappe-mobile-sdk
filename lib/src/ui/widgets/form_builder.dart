@@ -27,6 +27,7 @@ import 'fields/child_table_field.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
+import 'pending_field_work.dart';
 import '../form/form_controller.dart';
 import '../form/field_ui_state.dart';
 
@@ -416,6 +417,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   StreamSubscription<LinkLoadProgress>? _progressSubscription;
   bool _linkOptionsLoading = false;
   String? _linkOptionsLoadingMessage;
+  final PendingFieldWork _pendingFieldWork = PendingFieldWork();
+  bool _waitingForFieldWork = false;
   final Map<String, dynamic> _formData = {};
 
   /// > 0 while a programmatic-patch `patchValue` is being applied under
@@ -708,6 +711,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   Future<void> _handleReactiveSubmit() async {
     final c = _controller;
     if (c == null) return;
+    if (_pendingFieldWork.isBusy && !await _waitForFieldWork()) return;
     // Await async/server/duplicate validators before committing the submit.
     if (await c.validateAsync()) {
       widget.onSubmit?.call(c.buildSubmitData());
@@ -2077,7 +2081,30 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     super.dispose();
   }
 
+  /// Waits for field work that is still running, such as a photo that is
+  /// uploading, so a submit does not read the field from before it landed.
+  /// False when the form went away meanwhile, or when a submit is already
+  /// waiting, so a second tap does not submit twice.
+  Future<bool> _waitForFieldWork() async {
+    if (_waitingForFieldWork) return false;
+    _waitingForFieldWork = true;
+    try {
+      await _pendingFieldWork.whenIdle();
+    } finally {
+      _waitingForFieldWork = false;
+    }
+    return mounted;
+  }
+
   void _handleSubmit() {
+    if (_pendingFieldWork.isBusy) {
+      unawaited(
+        _waitForFieldWork().then((proceed) {
+          if (proceed) _handleSubmit();
+        }),
+      );
+      return;
+    }
     final state = _formKey.currentState;
     if (state == null) return;
 
@@ -2814,7 +2841,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => PendingFieldWorkScope(
+    tracker: _pendingFieldWork,
+    child: _buildForm(context),
+  );
+
+  Widget _buildForm(BuildContext context) {
     // Drop the per-build eval-data memo. Safe as a build-scoped cache because
     // every reader (`_shouldShowField` / `_isFieldRequired` /
     // `_isFieldReadOnly`, via `_hasAnyVisibleField`, `_buildFieldWidget` and

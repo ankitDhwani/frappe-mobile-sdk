@@ -14,6 +14,7 @@ import '../../../utils/media_store.dart';
 import '../../../utils/attachment_pick.dart';
 import '../../../utils/image_downscale.dart';
 import '../../../utils/sdk_log.dart';
+import '../pending_field_work.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 import 'media_resolve_builder.dart';
@@ -115,7 +116,11 @@ class _PickBusyGateState extends State<PickBusyGate> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      await work();
+      // The form waits for this before it reads the field, so a Save pressed
+      // while the photo is still uploading keeps the photo.
+      final running = work();
+      PendingFieldWorkScope.maybeOf(context)?.track(running);
+      await running;
     } finally {
       // Android can recreate the activity during a camera capture.
       if (mounted) setState(() => _busy = false);
