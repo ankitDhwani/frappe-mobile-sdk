@@ -28,6 +28,7 @@ import '../utils/mobile_creation_stamp.dart';
 import '../utils/uuid_pattern.dart';
 import 'widgets/screen_helpers.dart';
 import 'widgets/location_required_barrier.dart';
+import 'widgets/pending_field_work.dart' show FieldWorkWaitScope;
 import 'widgets/sync_error_banner.dart';
 import 'widgets/form_builder.dart'
     show
@@ -528,6 +529,10 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   /// keep the whole form rebuilding while the spinner spins.
   final ValueNotifier<bool> _isSyncing = ValueNotifier<bool>(false);
 
+  /// True while the form waits for a field's work (a photo still uploading)
+  /// before it saves; the Save button shows a spinner and is off meanwhile.
+  final ValueNotifier<bool> _waitingForFieldWork = ValueNotifier<bool>(false);
+
   Map<String, dynamic> get _currentDocData =>
       _workflowUpdatedDocData ??
       widget.document?.data ??
@@ -633,6 +638,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _isFormDirty.dispose();
     _isSyncing.dispose();
+    _waitingForFieldWork.dispose();
     if (_ownsFormController) _formController?.dispose();
     super.dispose();
   }
@@ -1530,18 +1536,26 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
               if (!showSave || widget.hideAppBarActions) {
                 return const SizedBox.shrink();
               }
-              return TextButton.icon(
-                key: const Key('form_save_button'),
-                style: widget.screenStyle?.saveButtonStyle,
-                onPressed: _isSaving ? null : () => _triggerSubmit?.call(),
-                icon: _isSaving
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.save),
-                label: Text(sdkTr('Save')),
+              return ValueListenableBuilder<bool>(
+                valueListenable: _waitingForFieldWork,
+                builder: (context, waiting, _) {
+                  // Waiting for a photo still uploading looks like saving: the
+                  // tap was taken, and a second one would do nothing.
+                  final busy = _isSaving || waiting;
+                  return TextButton.icon(
+                    key: const Key('form_save_button'),
+                    style: widget.screenStyle?.saveButtonStyle,
+                    onPressed: busy ? null : () => _triggerSubmit?.call(),
+                    icon: busy
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save),
+                    label: Text(sdkTr('Save')),
+                  );
+                },
               );
             },
           ),
@@ -1608,70 +1622,75 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                     showActions: widget.showWorkflowActions,
                   ),
                 Expanded(
-                  child: FrappeFormBuilder(
-                    key: widget.document != null
-                        ? ValueKey('form_${widget.document!.localId}')
-                        : const ValueKey('form_new'),
-                    mode: widget.mode,
-                    controller: _formController,
-                    meta: widget.meta,
-                    initialData:
-                        _workflowUpdatedDocData ??
-                        widget.document?.data ??
-                        widget.initialData,
-                    onSubmit: _handleSubmit,
-                    readOnly: effectiveReadOnly,
-                    onFormDataChanged: _onFormDataChanged,
-                    linkOptionService: widget.linkOptionService,
-                    useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
-                    customFieldFactory: widget.customFieldFactory,
-                    uploadFile: widget.api != null
-                        ? (file) async {
-                            final res = await widget.api!.attachment.uploadFile(
-                              file,
-                            );
-                            return res['file_url'] as String? ??
-                                res['file_name'] as String?;
-                          }
-                        : null,
-                    fileUrlBase: widget.api?.baseUrl,
-                    imageHeaders: widget.api?.requestHeaders,
-                    isOnline: widget.isOnline,
-                    pendingAttachmentPaths: _pendingAttachmentPaths,
-                    mediaResolver: _mediaResolver?.resolve,
-                    // Queue-aware: refuses to delete a staged file a
-                    // `pending_attachments` row still owns. See
-                    // `OfflineRepository.reclaimDiscardedAttachment`.
-                    reclaimAttachment:
-                        widget.repository.reclaimDiscardedAttachment,
-                    // Read live through the repository so a mid-session toggle
-                    // flip takes effect on the next pick.
-                    isOfflineMode: () => widget.repository.offlineMode.enabled,
-                    imagePickSource: widget.imagePickSource,
-                    fetchLinkedDocument: _fetchLinkedDocument,
-                    getMeta: widget.metaService != null
-                        ? (doctype) => widget.metaService!.getMeta(doctype)
-                        : null,
-                    creationCapture: _capture,
-                    sessionUser: widget.sessionUser,
-                    roundNumbersOnSave: widget.roundNumbersOnSave,
-                    registerSubmit: (trigger) {
-                      _triggerSubmit = trigger;
-                      widget.registerSubmit?.call(trigger);
-                    },
-                    onButtonPressed: widget.onButtonPressed != null
-                        ? (field, formData) => widget.onButtonPressed!(
-                            field,
-                            formData,
-                            _handleButtonPressed,
-                          )
-                        : _handleButtonPressed,
-                    style: widget.style,
-                    translate: widget.translate,
-                    onFieldChange: widget.onFieldChange,
-                    getLinkFilterBuilder: widget.getLinkFilterBuilder,
-                    cascadeProgrammaticChanges:
-                        widget.cascadeProgrammaticChanges,
+                  // Lets the Save button show that the form is waiting for a
+                  // photo still uploading before it saves.
+                  child: FieldWorkWaitScope(
+                    waiting: _waitingForFieldWork,
+                    child: FrappeFormBuilder(
+                      key: widget.document != null
+                          ? ValueKey('form_${widget.document!.localId}')
+                          : const ValueKey('form_new'),
+                      mode: widget.mode,
+                      controller: _formController,
+                      meta: widget.meta,
+                      initialData:
+                          _workflowUpdatedDocData ??
+                          widget.document?.data ??
+                          widget.initialData,
+                      onSubmit: _handleSubmit,
+                      readOnly: effectiveReadOnly,
+                      onFormDataChanged: _onFormDataChanged,
+                      linkOptionService: widget.linkOptionService,
+                      useLinkFieldCoordinator: widget.useLinkFieldCoordinator,
+                      customFieldFactory: widget.customFieldFactory,
+                      uploadFile: widget.api != null
+                          ? (file) async {
+                              final res = await widget.api!.attachment
+                                  .uploadFile(file);
+                              return res['file_url'] as String? ??
+                                  res['file_name'] as String?;
+                            }
+                          : null,
+                      fileUrlBase: widget.api?.baseUrl,
+                      imageHeaders: widget.api?.requestHeaders,
+                      isOnline: widget.isOnline,
+                      pendingAttachmentPaths: _pendingAttachmentPaths,
+                      mediaResolver: _mediaResolver?.resolve,
+                      // Queue-aware: refuses to delete a staged file a
+                      // `pending_attachments` row still owns. See
+                      // `OfflineRepository.reclaimDiscardedAttachment`.
+                      reclaimAttachment:
+                          widget.repository.reclaimDiscardedAttachment,
+                      // Read live through the repository so a mid-session toggle
+                      // flip takes effect on the next pick.
+                      isOfflineMode: () =>
+                          widget.repository.offlineMode.enabled,
+                      imagePickSource: widget.imagePickSource,
+                      fetchLinkedDocument: _fetchLinkedDocument,
+                      getMeta: widget.metaService != null
+                          ? (doctype) => widget.metaService!.getMeta(doctype)
+                          : null,
+                      creationCapture: _capture,
+                      sessionUser: widget.sessionUser,
+                      roundNumbersOnSave: widget.roundNumbersOnSave,
+                      registerSubmit: (trigger) {
+                        _triggerSubmit = trigger;
+                        widget.registerSubmit?.call(trigger);
+                      },
+                      onButtonPressed: widget.onButtonPressed != null
+                          ? (field, formData) => widget.onButtonPressed!(
+                              field,
+                              formData,
+                              _handleButtonPressed,
+                            )
+                          : _handleButtonPressed,
+                      style: widget.style,
+                      translate: widget.translate,
+                      onFieldChange: widget.onFieldChange,
+                      getLinkFilterBuilder: widget.getLinkFilterBuilder,
+                      cascadeProgrammaticChanges:
+                          widget.cascadeProgrammaticChanges,
+                    ),
                   ),
                 ),
               ],
