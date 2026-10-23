@@ -42,7 +42,6 @@ import 'widgets/fields/field_factory.dart' show FieldFactory;
 import '../utils/attachment_paths.dart';
 import '../utils/sdk_log.dart';
 
-/// Visual customization for [FormScreen] action area.
 /// Bound on the connect/headers phase of a media fetch.
 const Duration _mediaFetchConnectTimeout = Duration(seconds: 30);
 
@@ -53,25 +52,6 @@ const Duration _mediaFetchConnectTimeout = Duration(seconds: 30);
 /// connection that goes silent mid-body must not hang the resolve forever.
 const Duration _mediaFetchStallTimeout = Duration(seconds: 30);
 
-/// Accumulates [res]'s body, refusing anything over [cap] and giving up if the
-/// stream goes quiet for [stallTimeout]. Returns null on refusal or stall.
-///
-/// Extracted from `FormScreen._fetchMediaBytes` so the guard rails are testable
-/// without standing up a whole screen: the method builds its own `http.Client`,
-/// which leaves no seam for a hung-server test. [label] appears only in logs.
-///
-/// Two ceilings, because they catch different things: `Content-Length` refuses
-/// an oversized body before a single chunk is read, and the accumulate loop
-/// re-checks as it goes, because a chunked response declares no length and a
-/// server may under-report.
-///
-/// The stall bound is per-CHUNK, not a total deadline. A legitimately slow
-/// 25 MB download on a rural link must be allowed to finish; a connection that
-/// dies mid-body must not hang forever. The caller's `send` timeout covers only
-/// the connect/headers phase — once the response object exists it is satisfied,
-/// so before this bound a stalled stream left the resolve future permanently
-/// unresolved and the widget stuck on a spinner. `AttachField`'s own downloader
-/// already guarded this the same way (`_AttachViewButtonState.stallTimeout`).
 /// The GET request the media resolver's fetcher sends for a file [value], or
 /// null when the value is not a fetchable URL.
 ///
@@ -130,6 +110,25 @@ Future<List<int>?> fetchMediaBytes(
   }
 }
 
+/// Accumulates [res]'s body, refusing anything over [cap] and giving up if the
+/// stream goes quiet for [stallTimeout]. Returns null on refusal or stall.
+///
+/// Extracted from `FormScreen._fetchMediaBytes` so the guard rails are testable
+/// without standing up a whole screen: the method builds its own `http.Client`,
+/// which leaves no seam for a hung-server test. [label] appears only in logs.
+///
+/// Two ceilings, because they catch different things: `Content-Length` refuses
+/// an oversized body before a single chunk is read, and the accumulate loop
+/// re-checks as it goes, because a chunked response declares no length and a
+/// server may under-report.
+///
+/// The stall bound is per-CHUNK, not a total deadline. A legitimately slow
+/// 25 MB download on a rural link must be allowed to finish; a connection that
+/// dies mid-body must not hang forever. The caller's `send` timeout covers only
+/// the connect/headers phase — once the response object exists it is satisfied,
+/// so before this bound a stalled stream left the resolve future permanently
+/// unresolved and the widget stuck on a spinner. `AttachField`'s own downloader
+/// already guarded this the same way (`_AttachViewButtonState.stallTimeout`).
 @visibleForTesting
 Future<List<int>?> readCappedMediaBody(
   http.StreamedResponse res, {
@@ -165,6 +164,7 @@ Future<List<int>?> readCappedMediaBody(
   return bytes;
 }
 
+/// Visual customization for [FormScreen] action area.
 class FormScreenStyle {
   final Color? appBarBackgroundColor;
   final ButtonStyle? saveButtonStyle;
