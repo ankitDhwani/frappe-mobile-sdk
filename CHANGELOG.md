@@ -79,6 +79,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The image field shows progress and turns its buttons off while a picked photo is prepared, stored and uploaded.
   - Do not combine it with `serverOptimize`: the server's resize ignores the EXIF rotation, so an upright portrait photo would be cut to 512x768.
   - `Attach` fields are not covered.
+  - The shrunk copy is written to a `downscaled_` folder next to the picked file. The image field removes that folder as soon as the photo is in the attachment store (uploaded, kept for the queue, refused or failed); the field's value and the uploaded file are the attachment-store copy, so neither is touched. A host that calls `downscalePickedImage` directly owns the folder.
+  - The `image` constraint is `^4.10.1`, the version the shrink was tested with. The package reads the EXIF and encodes the JPEG; the decode and resize run in Flutter's engine (`dart:ui`).
+- **Data fields with options Email, Phone, Name or URL are checked on the form with the rules Frappe applies on save** (`BaseDocument._validate_data_fields`), so an invalid value is caught while the user is still on the form instead of failing at sync. The legacy form and `FormController` validation both run it.
+  - The checks are ports of `split_emails`, `validate_email_address`, `validate_name`, `validate_phone_number` and `validate_url` (`frappe/utils/__init__.py`, version-15), checked by executing Frappe's own functions: of about 35,000 fuzzed Email and URL values, none that Frappe accepts is refused.
+  - **Name** follows Python's `\w`: letters, numbers and `_` of any script, but not combining marks. A name with a vowel sign or virama (`किशोर`, `प्रिया`) or with a combining accent is refused, because the server refuses it; a precomposed accent passes.
+  - **Email**: every comma separates a part, quoted or not, so `"Doe, John" <j@example.com>` is refused, as on the server. A line break or tab is a space, so two addresses on two lines are refused. Text after a valid address (`a@example.com.`) passes, because Frappe matches from the start only. A value with quotes, comments or groups is refused only when it cannot hold an address; the server decides the rest.
+  - **URL** follows `urlparse`: a scheme with a host or path (`foo:bar` and `mailto:` pass), or a value starting with `/`. A host with an unpaired bracket is refused.
+  - Name, Phone and URL refuse a value of spaces only, as Frappe does. An Email list with no address passes.
+- **`FormScreen.roundNumbersOnSave`, `DocumentListScreen.sessionUser` and `DocumentListScreen.roundNumbersOnSave`, and a `roundNumbersOnSave` argument on `FrappeFormRenderer.renderForm` / `navigateToForm`.** All default to off / null, so nothing changes unless a host passes them.
 
 ### Fixed
 
@@ -99,15 +108,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Object stores also reject a foreign `Authorization` header, which made those files fail with HTTP 400.
   - New `authHeadersForUrl` keeps the headers for relative URLs and for URLs whose scheme, host and port match `fileUrlBase`, and drops them otherwise. A protocol-relative URL (`//host/x`) is compared with the base's scheme. With no usable `fileUrlBase` (none, or no scheme) the origin can't be checked, so only a relative URL gets the headers; an absolute one gets none. Pass `fileUrlBase` to load private files from absolute URLs on the Frappe host.
 - **Saving while a picked photo is still uploading no longer drops the photo.** An image field's pick, shrink and upload run after the tap, so a form saved in that window read the field from before the photo landed and stored the record without it (or with the previous photo). `FrappeFormBuilder` now waits for that work to finish before it reads the values, in legacy and reactive mode, and in the row form of a child table.
-  - A second Save press while it waits is ignored, so the record is saved once.
+  - A second Save press while it waits is ignored, so the record is saved once. `FormScreen`'s Save and a child-table row's Save show a spinner and are off while the form waits.
   - A photo that fails to upload does not block the save: the wait ends and the form saves as the field stands.
+  - The wait ends after 6 minutes even if the work has not, and the form saves as the fields stand. The SDK's own upload gives up after 5 minutes and the photo is then kept as a local file queued at save, so the bound only cuts work with no limit of its own, such as a host `uploadFile` without a timeout. A later Save waits again.
   - A form with nothing uploading saves at once, as before.
+- **`__user`, `user` and `user_fullname` defaults resolved to null in the SDK's own screens.** `DocumentListScreen`, `FrappeFormRenderer` and `MobileHomeScreen` opened forms without the signed-in user. `FrappeFormRenderer` and `MobileHomeScreen` now pass `FrappeSDK.sessionUser`; a host building `DocumentListScreen` itself passes `sessionUser:`. A child-table row form now gets the parent form's `sessionUser` and `roundNumbersOnSave`, so a new row's own defaults resolve too.
 - **A photo or file was lost when its tab was left while it uploaded.** A tab that is off screen is disposed, so when the upload finished, the field's state was gone: the update threw, `onChanged` never ran, and the record saved without the new file. A replaced file had already been reclaimed. `ImageField` and `AttachField` now hand the new value to `onChanged` first, update the field only while it is mounted, and reclaim the replaced file only after the new one is committed. A failing reclaim is logged and no longer reported as a failed pick.
 - **`non_negative` was not enforced in reactive (`FormController`) mode.** A negative value in a non-negative Int, Float, Currency or Percent field passed validation, saved locally and was refused at sync. `FormController` validation now refuses it with the same message as the legacy form.
 
 ### Changed
 
 - The comment on Rating's re-tap-clears behaviour now cites Frappe Desk's Rating control instead of a client app's component. No code change.
+- The doc comments of `readCappedMediaBody` and `FormScreenStyle` are back on their own declarations; one had been left above `mediaFetchRequest`. No code change.
 
 ### Security
 
