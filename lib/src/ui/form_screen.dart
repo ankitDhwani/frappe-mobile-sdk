@@ -234,6 +234,11 @@ class FormScreen extends StatefulWidget {
   /// unset for the server to fill on insert.
   final SessionUser? sessionUser;
 
+  /// Forwarded to [FrappeFormBuilder.roundNumbersOnSave], and to the
+  /// [FormController] this screen creates in [FormBuilderMode.reactive]. Off by
+  /// default, which saves numbers as entered.
+  final bool roundNumbersOnSave;
+
   /// Optional callback when a Button field is pressed. Override to implement client-script logic
   /// (API calls, dialogs, form updates). When null, default behavior applies: if [field.options]
   /// has a server method path, it is called; otherwise a message is shown.
@@ -331,6 +336,7 @@ class FormScreen extends StatefulWidget {
     this.initialData,
     this.creationCapture,
     this.sessionUser,
+    this.roundNumbersOnSave = false,
     this.onButtonPressed,
     this.onFieldChange,
     this.validator,
@@ -604,6 +610,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
             meta: widget.meta,
             initialData: widget.document?.data ?? widget.initialData,
             sessionUser: widget.sessionUser,
+            roundNumbersOnSave: widget.roundNumbersOnSave,
           );
       _ownsFormController = widget.controller == null;
       widget.onControllerReady?.call(_formController!);
@@ -1647,6 +1654,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         : null,
                     creationCapture: _capture,
                     sessionUser: widget.sessionUser,
+                    roundNumbersOnSave: widget.roundNumbersOnSave,
                     registerSubmit: (trigger) {
                       _triggerSubmit = trigger;
                       widget.registerSubmit?.call(trigger);
