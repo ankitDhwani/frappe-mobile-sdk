@@ -78,10 +78,11 @@ void main() {
     'a retry of the same uuid issues ONE POST and resolves via lookup',
     () async {
       final s = svc((req) async {
-        if (req.method == 'POST')
+        if (req.method == 'POST') {
           return _json({
             'data': {'name': 'DOC-1'},
           });
+        }
         if (req.url.path.contains('get_list')) {
           return _json({
             'message': [
@@ -110,10 +111,11 @@ void main() {
     // list query to answer identity, then a full fetch so the returned document
     // is the same shape a real create returns.
     final s = svc((req) async {
-      if (req.method == 'POST')
+      if (req.method == 'POST') {
         return _json({
           'data': {'name': 'DOC-7'},
         });
+      }
       if (req.url.path.contains('get_list')) {
         return _json({
           'message': [
@@ -147,10 +149,11 @@ void main() {
 
   test('a lookup that finds nothing lets the create proceed', () async {
     final s = svc((req) async {
-      if (req.method == 'POST')
+      if (req.method == 'POST') {
         return _json({
           'data': {'name': 'DOC-2'},
         });
+      }
       return _json({'message': <dynamic>[]});
     });
 
@@ -165,10 +168,11 @@ void main() {
 
   test('resetCreateIdempotency clears the remembered history', () async {
     final s = svc((req) async {
-      if (req.method == 'POST')
+      if (req.method == 'POST') {
         return _json({
           'data': {'name': 'DOC-3'},
         });
+      }
       return _json({'message': <dynamic>[]});
     });
 

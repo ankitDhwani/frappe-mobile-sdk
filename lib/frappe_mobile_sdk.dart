@@ -16,6 +16,7 @@ export 'src/models/document.dart';
 export 'src/models/mobile_form_name.dart';
 export 'src/models/workflow_transition.dart';
 export 'src/models/link_filter_result.dart';
+export 'src/models/link_search_policy.dart';
 // #53 (A5): outbox types on the public surface so app teams build type-safe
 // outbox UI without reaching into `src/` via implementation_imports.
 export 'src/models/outbox_row.dart'
@@ -42,6 +43,8 @@ export 'src/services/media_resolver.dart' show ResolveMediaFn;
 // factory — has to name the type. `media_store.dart` is otherwise internal, so
 // only the typedef is shown.
 export 'src/utils/media_store.dart' show ReclaimAttachmentFn;
+export 'src/utils/image_downscale.dart'
+    show ImageCaptureLimits, ImageUploadSettings, downscalePickedImage;
 
 // Database
 export 'src/database/app_database.dart';
@@ -141,7 +144,8 @@ export 'src/ui/app_guard.dart';
 export 'src/ui/login_screen.dart';
 export 'src/ui/login_screen_style.dart';
 export 'src/ui/doctype_list_screen.dart';
-export 'src/ui/form_screen.dart';
+// Test seams for FormScreen's media fetcher.
+export 'src/ui/form_screen.dart' hide fetchMediaBytes, mediaFetchRequest;
 export 'src/ui/document_list_screen.dart';
 export 'src/ui/sync_status_screen.dart';
 export 'src/ui/form_renderer_helper.dart';

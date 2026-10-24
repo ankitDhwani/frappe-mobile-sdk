@@ -24,6 +24,7 @@ import '../database/daos/sdk_meta_dao.dart';
 import '../database/daos/translation_dao.dart';
 import '../models/closure_result.dart';
 import '../models/doc_type_meta.dart';
+import '../models/link_search_policy.dart';
 import '../models/offline_mode.dart';
 import '../models/offline_mode_notifier.dart';
 import '../models/session_user.dart';
@@ -85,6 +86,11 @@ class FrappeSDK {
   final bool tamperProtectionEnabled;
   final Set<SecurityCheck> tamperProtectionChecks;
   final int tamperProtectionRestartGapMs;
+
+  /// How Link pickers load and search options in online-first mode. The
+  /// default loads a short first page and searches the server as the user
+  /// types; [LinkSearchPolicy.disabled] keeps the full prefetch.
+  final LinkSearchPolicy linkSearchPolicy;
 
   FrappeClient? _client;
   AppDatabase? _database;
@@ -246,6 +252,7 @@ class FrappeSDK {
     this.tamperProtectionEnabled = false,
     this.tamperProtectionChecks = const {},
     this.tamperProtectionRestartGapMs = 600000,
+    this.linkSearchPolicy = const LinkSearchPolicy(),
   });
 
   /// Test-only constructor: accepts a pre-built [AppDatabase] (e.g. in-memory).
@@ -274,6 +281,7 @@ class FrappeSDK {
     this.tamperProtectionEnabled = false,
     this.tamperProtectionChecks = const {},
     this.tamperProtectionRestartGapMs = 600000,
+    this.linkSearchPolicy = const LinkSearchPolicy(),
   }) : databaseAppName = null,
        payloadTransformer = null,
        onFfiInitFailure = null {
@@ -342,6 +350,7 @@ class FrappeSDK {
       testMetaFn,
       syncComplete$: _syncCompleteController?.stream,
       translate: (s) => _translationService?.translate(s) ?? s,
+      searchPolicy: linkSearchPolicy,
     );
     _offlineTransitionService = OfflineTransitionService(
       database: _database!,
@@ -598,6 +607,7 @@ class FrappeSDK {
       // doctype is a translated_doctype (Frappe `__()` parity). Reads the
       // field at call time so a post-logout reset / locale change is honored.
       translate: (s) => _translationService?.translate(s) ?? s,
+      searchPolicy: linkSearchPolicy,
     );
 
     // Build the offline-transition service. It owns its own broadcast

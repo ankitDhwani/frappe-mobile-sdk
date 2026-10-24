@@ -11,6 +11,7 @@ import '../models/doc_field.dart';
 import '../models/doc_type_meta.dart';
 import '../models/document.dart';
 import '../models/link_filter_result.dart';
+import '../models/session_user.dart';
 import '../models/outbox_row.dart';
 import '../models/workflow_transition.dart';
 import '../services/link_option_service.dart';
@@ -71,6 +72,64 @@ const Duration _mediaFetchStallTimeout = Duration(seconds: 30);
 /// so before this bound a stalled stream left the resolve future permanently
 /// unresolved and the widget stuck on a spinner. `AttachField`'s own downloader
 /// already guarded this the same way (`_AttachViewButtonState.stallTimeout`).
+/// The GET request the media resolver's fetcher sends for a file [value], or
+/// null when the value is not a fetchable URL.
+///
+/// The session [headers] go to the Frappe origin only ([authHeadersForUrl]). A
+/// file value can be an absolute URL on object storage or a CDN; sending the
+/// token there leaks it to a third party, and the store rejects the request.
+@visibleForTesting
+http.Request? mediaFetchRequest(
+  String value, {
+  required String? baseUrl,
+  required Map<String, String> headers,
+}) {
+  final url = frappeFileFetchUrl(value, baseUrl);
+  if (url == null || !url.startsWith('http')) return null;
+  return http.Request('GET', Uri.parse(url))
+    ..headers.addAll(authHeadersForUrl(url, headers, baseUrl) ?? const {});
+}
+
+/// What the media resolver's fetcher downloads for a file [value]: the body of
+/// [mediaFetchRequest], capped at [cap] bytes, or null when the value is not a
+/// fetchable URL, the server refuses it, or the fetch fails.
+///
+/// [newClient] is a test seam; each fetch gets its own client, closed once the
+/// body has been read.
+@visibleForTesting
+Future<List<int>?> fetchMediaBytes(
+  String value, {
+  required String? baseUrl,
+  required Map<String, String> headers,
+  http.Client Function() newClient = http.Client.new,
+  int cap = kDefaultMaxMediaFetchBytes,
+}) async {
+  if (frappeFileFetchUrl(value, baseUrl)?.startsWith('http') != true) {
+    return null;
+  }
+  http.Client? client;
+  try {
+    final request = mediaFetchRequest(
+      value,
+      baseUrl: baseUrl,
+      headers: headers,
+    )!;
+    client = newClient();
+    final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+
+    // Awaited: returning the future from inside `try` would let `finally`
+    // close the client while the body is still streaming, and an error from
+    // the read would escape the `catch`.
+    return await readCappedMediaBody(res, cap: cap, label: value);
+  } catch (e, st) {
+    sdkLog('fetchMediaBytes($value) failed — $e\n$st');
+    return null;
+  } finally {
+    client?.close();
+  }
+}
+
 @visibleForTesting
 Future<List<int>?> readCappedMediaBody(
   http.StreamedResponse res, {
@@ -170,6 +229,11 @@ class FormScreen extends StatefulWidget {
   /// `mobile_control` is unaffected either way.
   final MobileCreationCapture? creationCapture;
 
+  /// The signed-in user, for `__user`, `user` and `user_fullname` defaults on
+  /// a new document. Pass `FrappeSDK.sessionUser`; null leaves those fields
+  /// unset for the server to fill on insert.
+  final SessionUser? sessionUser;
+
   /// Optional callback when a Button field is pressed. Override to implement client-script logic
   /// (API calls, dialogs, form updates). When null, default behavior applies: if [field.options]
   /// has a server method path, it is called; otherwise a message is shown.
@@ -266,6 +330,7 @@ class FormScreen extends StatefulWidget {
     this.translate,
     this.initialData,
     this.creationCapture,
+    this.sessionUser,
     this.onButtonPressed,
     this.onFieldChange,
     this.validator,
@@ -400,24 +465,11 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
   Future<List<int>?> _fetchMediaBytes(String value) async {
     final api = widget.api;
     if (api == null) return null;
-    final url = frappeFileFetchUrl(value, api.baseUrl);
-    if (url == null || !url.startsWith('http')) return null;
-    const cap = kDefaultMaxMediaFetchBytes;
-    http.Client? client;
-    try {
-      client = http.Client();
-      final request = http.Request('GET', Uri.parse(url))
-        ..headers.addAll(api.requestHeaders);
-      final res = await client.send(request).timeout(_mediaFetchConnectTimeout);
-      if (res.statusCode < 200 || res.statusCode >= 300) return null;
-
-      return readCappedMediaBody(res, cap: cap, label: value);
-    } catch (e, st) {
-      sdkLog('FormScreen._fetchMediaBytes($value) failed — $e\n$st');
-      return null;
-    } finally {
-      client?.close();
-    }
+    return fetchMediaBytes(
+      value,
+      baseUrl: api.baseUrl,
+      headers: api.requestHeaders,
+    );
   }
 
   void _buildMediaResolver() {
@@ -551,6 +603,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
           FormController(
             meta: widget.meta,
             initialData: widget.document?.data ?? widget.initialData,
+            sessionUser: widget.sessionUser,
           );
       _ownsFormController = widget.controller == null;
       widget.onControllerReady?.call(_formController!);
@@ -1593,6 +1646,7 @@ class _FormScreenState extends State<FormScreen> with WidgetsBindingObserver {
                         ? (doctype) => widget.metaService!.getMeta(doctype)
                         : null,
                     creationCapture: _capture,
+                    sessionUser: widget.sessionUser,
                     registerSubmit: (trigger) {
                       _triggerSubmit = trigger;
                       widget.registerSubmit?.call(trigger);

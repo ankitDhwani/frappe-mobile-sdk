@@ -18,9 +18,25 @@ dependencies:
   flutter:
     sdk: flutter
 
+  # >=2.0.0-beta.3 <3.0.0. The prerelease has to be in the constraint:
+  # `2.0.0-beta.4` orders BELOW `2.0.0`, so `^2.0.0` — which is what
+  # `flutter pub add` writes — resolves `>=2.0.0 <3.0.0` and skips every beta.
+  frappe_mobile_sdk: ^2.0.0-beta.3
+```
+
+Or from Git:
+
+```yaml
+dependencies:
+  flutter:
+    sdk: flutter
+
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
+      # Both `main` and `develop` currently sit on the same 2.0 beta, so
+      # neither ref is a stable line today. Pin a tag if you need one
+      # version — a branch ref moves under you.
       ref: main
 ```
 

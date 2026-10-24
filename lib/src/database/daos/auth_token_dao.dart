@@ -1,4 +1,5 @@
 import 'package:sqflite/sqflite.dart';
+import '../../utils/sdk_log.dart';
 import '../entities/auth_token_entity.dart';
 
 class AuthTokenDao {
@@ -23,6 +24,34 @@ class AuthTokenDao {
       token.toDb(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  /// [insertToken], then scrubs what the replaced row left on disk:
+  /// `secure_delete` zeroes the freed record instead of leaving its bytes in
+  /// the page, and a TRUNCATE checkpoint drops the WAL frames that still hold
+  /// it. For replacing a row that held a secret. The pragmas are best effort
+  /// and never fail the write.
+  Future<void> replaceTokenScrubbingOld(AuthTokenEntity token) async {
+    Object? previous;
+    try {
+      final rows = await _database.rawQuery('PRAGMA secure_delete');
+      previous = rows.isEmpty ? null : rows.first.values.first;
+      await _database.rawQuery('PRAGMA secure_delete = 1');
+    } catch (e) {
+      sdkLog('AuthTokenDao: secure_delete unavailable — $e');
+    }
+    try {
+      await insertToken(token);
+    } finally {
+      try {
+        if (previous is int) {
+          await _database.rawQuery('PRAGMA secure_delete = $previous');
+        }
+        await _database.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
+      } catch (e) {
+        sdkLog('AuthTokenDao: scrub after token replace failed — $e');
+      }
+    }
   }
 
   Future<void> updateToken(AuthTokenEntity token) async {

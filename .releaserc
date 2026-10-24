@@ -1,5 +1,9 @@
 {
-	"branches": ["main", "master"],
+	"branches": [
+		"main",
+		"master",
+		{ "name": "develop", "prerelease": "beta", "channel": false }
+	],
 	"plugins": [
 		[
 			"@semantic-release/commit-analyzer",
@@ -49,12 +53,6 @@
 			}
 		],
 		[
-			"@semantic-release/changelog",
-			{
-				"changelogFile": "CHANGELOG.md"
-			}
-		],
-		[
 			"@semantic-release/exec",
 			{
 				"prepareCmd": "python $GITHUB_WORKSPACE/.github/helper/update-version.py ${nextRelease.version}"
@@ -63,7 +61,7 @@
 		[
 			"@semantic-release/git",
 			{
-				"assets": ["pubspec.yaml", "example/pubspec.yaml"],
+				"assets": ["pubspec.yaml", "example/pubspec.yaml", "example/pubspec.lock"],
 				"message": "chore(release): Bumped to Version ${nextRelease.version}"
 			}
 		],

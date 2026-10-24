@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:frappe_mobile_sdk/frappe_mobile_sdk.dart';
 import 'package:frappe_mobile_sdk/src/ui/form/form_controller.dart';
-import 'package:frappe_mobile_sdk/src/ui/widgets/fields/child_table_field.dart';
 
 /// Serves a fixed option list so a `Table MultiSelect` can actually be picked
 /// from in a widget test (no DB, no resolver).

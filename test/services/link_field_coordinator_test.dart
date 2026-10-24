@@ -37,6 +37,14 @@ class _StubLinkOptionService extends LinkOptionService {
   }
 }
 
+class _ServerSearchStub extends _StubLinkOptionService {
+  _ServerSearchStub({required this.searched});
+  final Set<String> searched;
+
+  @override
+  bool usesServerSearch(String doctype) => searched.contains(doctype);
+}
+
 LinkOptionEntity _opt(String name) =>
     LinkOptionEntity(doctype: 'Target', name: name, lastUpdated: 1);
 
@@ -392,6 +400,23 @@ void main() {
         isTrue,
         reason: 'sequenced dependent fetch should run after independent',
       );
+    });
+
+    test('skips targets searched on the server: their pickers load their own '
+        'first page, so a full prefetch is never read', () async {
+      final stub = _ServerSearchStub(searched: {'Product Code'});
+      final coord = LinkFieldCoordinator(
+        meta: _meta([
+          _link('product_code', options: 'Product Code'),
+          _link('state', options: 'State'),
+        ]),
+        linkOptionService: stub,
+      );
+      coord.prefetchInitial({});
+      for (var i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(stub.calls, ['State']);
     });
 
     test('is idempotent — second call does not re-fetch', () async {

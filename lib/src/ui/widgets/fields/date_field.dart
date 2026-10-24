@@ -40,7 +40,7 @@ class DateField extends BaseField {
       validator: field.reqd
           ? (value) => requiredValidator(value, field.displayLabel)
           : null,
-      onChanged: (val) => onChanged?.call(val?.toIso8601String()),
+      onChanged: (val) => onChanged?.call(val == null ? null : frappeDate(val)),
     );
   }
 }

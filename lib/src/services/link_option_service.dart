@@ -4,10 +4,13 @@ import 'package:flutter/foundation.dart';
 
 import '../database/entities/link_option_entity.dart';
 import '../models/doc_field.dart';
+import '../models/doc_type_meta.dart';
 import '../models/link_filter_result.dart';
+import '../models/link_search_policy.dart';
 import '../models/meta_resolver.dart';
 import '../query/unified_resolver.dart';
 import '../utils/depends_on_evaluator.dart';
+import '../utils/sdk_log.dart';
 
 /// Fetches link field options via [UnifiedResolver] (DB-first + background API refresh).
 ///
@@ -25,10 +28,19 @@ class LinkOptionService {
   /// `__()` on link/select titles. Null in tests / when no host is bound.
   final String Function(String)? _translate;
 
+  /// How pickers load and search options in online-first mode. See
+  /// [usesServerSearch].
+  final LinkSearchPolicy _searchPolicy;
+  LinkSearchPolicy get searchPolicy => _searchPolicy;
+
   /// Broadcasts after each closure-pull batch finishes. Wired from
   /// [FrappeSDK.syncComplete$]. Pickers and the [LinkFieldCoordinator]
   /// listen to this to invalidate stale empty caches and re-fetch
   /// options for fields whose target doctype just got fresh data.
+  ///
+  /// A broadcast stream, or null: a single-subscription stream passed to the
+  /// constructor is shared through [Stream.asBroadcastStream], which takes
+  /// its one subscription when the service is built.
   Stream<void>? get syncComplete$ => _syncCompleteStream;
 
   /// Primary constructor — inject a wired [UnifiedResolver].
@@ -37,10 +49,21 @@ class LinkOptionService {
     MetaResolverFn metaResolver, {
     Stream<void>? syncComplete$,
     String Function(String)? translate,
+    LinkSearchPolicy searchPolicy = const LinkSearchPolicy(),
   }) : _resolver = resolver,
        _metaResolver = metaResolver,
-       _syncCompleteStream = syncComplete$,
-       _translate = translate;
+       // This service and every picker listen; a single-subscription stream
+       // takes one listener, so it is shared as a broadcast stream.
+       _syncCompleteStream = syncComplete$ == null || syncComplete$.isBroadcast
+           ? syncComplete$
+           : syncComplete$.asBroadcastStream(),
+       _translate = translate,
+       _searchPolicy = searchPolicy {
+    // A finished sync can change any target, so cached first pages go. This
+    // listener is added before any picker exists, so it runs before a picker's
+    // own sync-complete reload asks for a first page again.
+    _syncCompleteStream?.listen((_) => _forgetFirstPages());
+  }
 
   /// Converts Frappe-shaped filter rows to the 3-tuple `[field, op, value]`
   /// shape that [UnifiedResolver.resolve] consumes. Frappe APIs hand back
@@ -68,7 +91,8 @@ class LinkOptionService {
     : _resolver = null,
       _metaResolver = null,
       _syncCompleteStream = null,
-      _translate = null;
+      _translate = null,
+      _searchPolicy = LinkSearchPolicy.disabled;
 
   /// Max entries in [_titleCache]. A Link title is a short string, so 500 caps
   /// the cache in the low tens of KB while still covering a long scroll through
@@ -218,8 +242,18 @@ class LinkOptionService {
       doctype: doctype,
       filters: threeTuples,
       page: 0,
-      pageSize: 5000,
+      pageSize: _prefetchCap,
     );
+    // A full page means the list is truncated and a picker filtering it in
+    // memory cannot reach the rest. Say so once per doctype.
+    if (result.rows.length >= _prefetchCap && _capLogged.add(doctype)) {
+      sdkLog(
+        'LinkOptionService: $doctype returned $_prefetchCap options, the '
+        'prefetch cap; records past it cannot be picked from a list filtered '
+        'in memory. Online-first pickers search the server instead '
+        '(LinkSearchPolicy).',
+      );
+    }
 
     return _rowsToEntities(
       result.rows,
@@ -227,6 +261,275 @@ class LinkOptionService {
       titleField,
       translateLabels: meta.translatedDoctype,
     );
+  }
+
+  static const int _prefetchCap = 5000;
+  final Set<String> _capLogged = <String>{};
+
+  /// Whether a picker for [doctype] loads a short first page and searches the
+  /// server as the user types ([searchLinkOptions]) instead of filtering a
+  /// [getLinkOptions] prefetch in memory.
+  ///
+  /// True only in online-first mode (offline mode disabled) with a client,
+  /// when [searchPolicy] is enabled and does not list [doctype] in
+  /// [LinkSearchPolicy.prefetchOnlyDoctypes]. Always false for a service built
+  /// with [LinkOptionService.withoutResolver], so a subclass that overrides
+  /// only [getLinkOptions] keeps the prefetch.
+  bool usesServerSearch(String doctype) {
+    final resolver = _resolver;
+    if (resolver == null || _metaResolver == null) return false;
+    final policy = _searchPolicy;
+    if (!policy.enabled || policy.prefetchOnlyDoctypes.contains(doctype)) {
+      return false;
+    }
+    return !resolver.offlineMode.enabled && resolver.client != null;
+  }
+
+  /// Options of [doctype] matching [txt], read from the server; at most
+  /// [pageLength] rows. An empty [txt] is the prefetch: the first page.
+  ///
+  /// Matches `LIKE %txt%` against `name`, the title field and the doctype's
+  /// `search_fields`, ORed, and ANDed with [filters]. That is what Desk's Link
+  /// control matches (`frappe.desk.search.search_widget`). The request is the
+  /// same `frappe.client.get_list` the prefetch makes, so labels are built
+  /// exactly as [getLinkOptions] builds them.
+  ///
+  /// `get_list` returns one page in the doctype's sort order (by default the
+  /// most recently modified first), so when that page comes back full a
+  /// second request asks for exact matches (`=` on the same columns, same
+  /// [filters]). An exact match past the page is then still returned. Rows whose docname or label equals [txt] come first, then
+  /// docnames starting with [txt], then the rest in the server's order. Desk
+  /// ranks in SQL instead; `order_by` is not used here because the typed text
+  /// would have to go inside the SQL expression. `=` follows the database
+  /// collation: case-insensitive on MariaDB's default, case-sensitive on
+  /// Postgres.
+  ///
+  /// A translated doctype is matched on its translated labels, which only
+  /// exist on the device, so it is fetched whole (as [getLinkOptions]) and
+  /// filtered here. Its result can therefore hold MORE than [pageLength] rows.
+  Future<List<LinkOptionEntity>> searchLinkOptions(
+    String doctype, {
+    required String txt,
+    required int pageLength,
+    List<List<dynamic>>? filters,
+  }) async {
+    assert(pageLength >= 1, 'pageLength must be at least 1');
+    final resolver = _resolver;
+    final metaResolver = _metaResolver;
+    if (resolver == null || metaResolver == null) return const [];
+    final q = txt.trim();
+
+    // Offline mode switched on while a picker was open: a server-shaped query
+    // would fail against the local mirror, so search what is on the device.
+    if (resolver.offlineMode.enabled) {
+      final options = await getLinkOptionsOffline(
+        doctype: doctype,
+        filters: filters,
+        query: q.isEmpty ? null : q,
+        pageSize: pageLength,
+      );
+      return q.isEmpty ? options : _rankForText(options, q);
+    }
+
+    if (q.isNotEmpty) {
+      return _searchServer(doctype, q, pageLength, filters);
+    }
+    // The first page: every picker on the same target with the same filters
+    // shares one request, and a remount within [_firstPageTtl] reuses it.
+    final key = '$doctype|$pageLength|${filters ?? const []}';
+    final cached = _firstPages[key];
+    if (cached != null &&
+        DateTime.now().difference(cached.at) < _firstPageTtl) {
+      return cached.options;
+    }
+    final inFlight = _firstPageInFlight[key];
+    if (inFlight != null) return inFlight;
+    // A sync that finishes while this request is out makes its answer stale:
+    // it is still returned to the pickers that asked, but not cached.
+    final generation = _firstPageGeneration;
+    late final Future<List<LinkOptionEntity>> request;
+    request = _searchServer(doctype, q, pageLength, filters)
+        .then((options) {
+          if (generation == _firstPageGeneration) {
+            _cacheFirstPage(key, options);
+          }
+          return options;
+        })
+        .whenComplete(() {
+          // A block body on purpose: `=> remove(key)` returns the very
+          // future being completed, and whenComplete would wait on itself.
+          if (identical(_firstPageInFlight[key], request)) {
+            _firstPageInFlight.remove(key);
+          }
+        });
+    return _firstPageInFlight[key] = request;
+  }
+
+  static const Duration _firstPageTtl = Duration(seconds: 30);
+
+  /// Most first pages kept at once. Entries also expire after [_firstPageTtl]
+  /// and are dropped on the next write.
+  static const int _firstPagesMax = 50;
+  final Map<String, _FirstPage> _firstPages = <String, _FirstPage>{};
+  final Map<String, Future<List<LinkOptionEntity>>> _firstPageInFlight =
+      <String, Future<List<LinkOptionEntity>>>{};
+
+  /// Bumped by every finished sync; see [searchLinkOptions].
+  int _firstPageGeneration = 0;
+
+  void _cacheFirstPage(String key, List<LinkOptionEntity> options) {
+    final now = DateTime.now();
+    _firstPages.removeWhere((_, p) => now.difference(p.at) >= _firstPageTtl);
+    _firstPages.remove(key);
+    _firstPages[key] = _FirstPage(options, now);
+    if (_firstPages.length > _firstPagesMax) {
+      _firstPages.remove(_firstPages.keys.first);
+    }
+  }
+
+  void _forgetFirstPages() {
+    _firstPageGeneration++;
+    _firstPages.clear();
+    _firstPageInFlight.clear();
+  }
+
+  /// [options] ordered for the typed text [q]: an exact docname or label
+  /// match first, then docnames starting with [q], then the rest. Each group
+  /// keeps the order it was given in.
+  static List<LinkOptionEntity> _rankForText(
+    List<LinkOptionEntity> options,
+    String q,
+  ) {
+    final t = q.toLowerCase();
+    final exact = <LinkOptionEntity>[];
+    final prefix = <LinkOptionEntity>[];
+    final rest = <LinkOptionEntity>[];
+    for (final o in options) {
+      final name = o.name.toLowerCase();
+      if (name == t || o.label?.toLowerCase() == t) {
+        exact.add(o);
+      } else if (name.startsWith(t)) {
+        prefix.add(o);
+      } else {
+        rest.add(o);
+      }
+    }
+    return [...exact, ...prefix, ...rest];
+  }
+
+  Future<List<LinkOptionEntity>> _searchServer(
+    String doctype,
+    String q,
+    int pageLength,
+    List<List<dynamic>>? filters,
+  ) async {
+    final resolver = _resolver!;
+    final meta = await _metaResolver!(doctype);
+    final lower = q.toLowerCase();
+
+    if (meta.translatedDoctype) {
+      final all = await getLinkOptions(doctype, filters: filters);
+      if (q.isEmpty) return all;
+      return all
+          .where(
+            (o) =>
+                (o.label ?? o.name).toLowerCase().contains(lower) ||
+                o.name.toLowerCase().contains(lower),
+          )
+          .toList();
+    }
+
+    final threeTuples = _toThreeTuples(
+      _normalizeFiltersForDoctype(doctype, filters),
+    );
+    final columns = searchColumnsFor(meta);
+    // [op] and [value] apply to every search column, ORed; none for the
+    // first page.
+    Future<List<Map<String, Object?>>> fetch(String op, String value) async {
+      final result = await resolver.resolve(
+        doctype: doctype,
+        filters: threeTuples,
+        orFilters: [
+          if (q.isNotEmpty)
+            for (final column in columns) [column, op, value],
+        ],
+        page: 0,
+        pageSize: pageLength,
+      );
+      return result.rows;
+    }
+
+    List<LinkOptionEntity> toOptions(List<Map<String, Object?>> rows) =>
+        _rowsToEntities(
+          rows,
+          doctype,
+          meta.titleField,
+          translateLabels: meta.translatedDoctype,
+        );
+
+    final rows = await fetch('like', '%$q%');
+    final options = toOptions(rows);
+    if (q.isEmpty) return options;
+
+    // A full page may have cut off an exact match: `get_list` returns the
+    // first page in the doctype's sort order (by default, most recently
+    // modified). A page that is not full holds every match.
+    var exact = const <LinkOptionEntity>[];
+    if (rows.length >= pageLength) {
+      try {
+        exact = toOptions(await fetch('=', q));
+      } catch (e, st) {
+        // The LIKE page already answered; keep it rather than fail.
+        sdkLog(
+          'LinkOptionService: exact-match search on $doctype failed, '
+          'showing the LIKE page only — $e\n$st',
+        );
+      }
+    }
+    final seen = <String>{};
+    final merged = [
+      ...exact,
+      ...options,
+    ].where((o) => seen.add(o.name)).toList();
+    return _rankForText(merged, q).take(pageLength).toList();
+  }
+
+  /// Field types Desk searches in (`search_widget`).
+  static const Set<String> _searchableTypes = {
+    'Data',
+    'Text',
+    'Small Text',
+    'Long Text',
+    'Link',
+    'Select',
+    'Read Only',
+    'Text Editor',
+  };
+
+  /// The columns a server search matches: `name`, the title field, then each
+  /// `search_fields` entry. Only real fields of a searchable type are kept:
+  /// `search_fields` is free text on the server, and a column that does not
+  /// exist makes Frappe refuse the whole query (HTTP 417).
+  @visibleForTesting
+  static List<String> searchColumnsFor(DocTypeMeta meta) {
+    final types = <String, String>{
+      for (final f in meta.fields)
+        if (f.fieldname != null && f.fieldname!.isNotEmpty)
+          f.fieldname!: f.fieldtype,
+    };
+    final out = <String>['name'];
+    void add(String? raw) {
+      final f = raw?.trim();
+      if (f == null || f.isEmpty || out.contains(f)) return;
+      if (!_searchableTypes.contains(types[f])) return;
+      out.add(f);
+    }
+
+    add(meta.titleField);
+    for (final f in meta.searchFields ?? const <String>[]) {
+      add(f);
+    }
+    return out;
   }
 
   /// Converts resolver rows to [LinkOptionEntity] list.
@@ -497,7 +800,10 @@ class LinkOptionService {
   ///
   /// Delegates to the stored [UnifiedResolver]. The [filters] accept Frappe
   /// 4-tuple `[doctype, field, op, value]` or 3-tuple `[field, op, value]`
-  /// form. [query] becomes a `LIKE %...%` search on the doctype's title field.
+  /// form. [query] becomes a `LIKE %...%` search on the docname, the title
+  /// field and the doctype's `search_fields`, ORed, as [searchLinkOptions]
+  /// searches the server. Locally the docname is `server_name`, or
+  /// `mobile_uuid` for a row not pushed yet.
   Future<List<LinkOptionEntity>> getLinkOptionsOffline({
     required String doctype,
     List<List<dynamic>>? filters,
@@ -513,13 +819,29 @@ class LinkOptionService {
     final titleField = meta.titleField;
 
     final threeTuples = _toThreeTuples(filters);
-    if (query != null && query.isNotEmpty && titleField != null) {
-      threeTuples.add([titleField, 'like', '%$query%']);
+    // The title field is always matched, whatever its type, as this method
+    // matched it before; [searchColumnsFor] would drop a type Desk does not
+    // search (Phone, Autocomplete, ...).
+    final columns = searchColumnsFor(meta);
+    if (titleField != null &&
+        titleField.isNotEmpty &&
+        !columns.contains(titleField)) {
+      columns.insert(1, titleField);
     }
+    final orFilters = <List<dynamic>>[
+      if (query != null && query.isNotEmpty)
+        for (final column in columns)
+          if (column == 'name') ...[
+            ['server_name', 'like', '%$query%'],
+            ['mobile_uuid', 'like', '%$query%'],
+          ] else
+            [column, 'like', '%$query%'],
+    ];
 
     final result = await resolver.resolve(
       doctype: doctype,
       filters: threeTuples,
+      orFilters: orFilters,
       page: page,
       pageSize: pageSize,
     );
@@ -531,4 +853,11 @@ class LinkOptionService {
       translateLabels: meta.translatedDoctype,
     );
   }
+}
+
+/// A first page fetched by [LinkOptionService.searchLinkOptions], and when.
+class _FirstPage {
+  _FirstPage(this.options, this.at);
+  final List<LinkOptionEntity> options;
+  final DateTime at;
 }

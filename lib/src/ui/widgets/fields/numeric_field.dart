@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
+import '../../../utils/translate.dart';
 
 /// Widget for numeric field types (Int, Float, Currency, Percent)
 class NumericField extends BaseField {
@@ -45,15 +46,24 @@ class NumericField extends BaseField {
             prefixText: isCurrency ? '₹ ' : null,
             suffixText: isPercent ? '%' : null,
           ),
-      validator: field.reqd
+      // Stays null for a field that is neither required nor non-negative, so
+      // those fields validate exactly as before.
+      validator: field.reqd || field.nonNegative
           ? (value) {
-              final required = requiredValidator(value, field.displayLabel);
-              if (required != null) return required;
-              final numValue = isInt
-                  ? int.tryParse(value!)
-                  : double.tryParse(value!);
-              if (numValue == null) {
-                return 'Please enter a valid number';
+              if (field.reqd) {
+                final required = requiredValidator(value, field.displayLabel);
+                if (required != null) return required;
+                final numValue = isInt
+                    ? int.tryParse(value!)
+                    : double.tryParse(value!);
+                if (numValue == null) {
+                  return 'Please enter a valid number';
+                }
+              }
+              if (field.rejectsAsNegative(value)) {
+                return sdkTr('Value cannot be negative for {0}', [
+                  field.displayLabel,
+                ]);
               }
               return null;
             }

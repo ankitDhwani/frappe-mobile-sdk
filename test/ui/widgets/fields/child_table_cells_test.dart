@@ -60,7 +60,7 @@ void main() {
       const {'size': '500g'},
       _meta(),
       childListViewFields(_meta()),
-      (_, __) async => null,
+      (_, _) async => null,
     );
     expect(cells.length, 2);
     expect(cells.last.value, '—');
@@ -71,7 +71,7 @@ void main() {
       const {'size': '', 'source': 'SRC-404'},
       _meta(),
       childListViewFields(_meta()),
-      (_, __) async => null,
+      (_, _) async => null,
     );
     expect(cells.last.value, 'SRC-404');
   });

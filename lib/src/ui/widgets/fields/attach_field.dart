@@ -24,6 +24,77 @@ import 'field_helpers.dart';
 // ImageField previews, with the same auth headers.
 import 'image_field.dart';
 
+/// Normalises the result of `FilePicker.pickFiles()` across the file_picker
+/// major versions this SDK supports (`>=11.0.2 <14.0.0`).
+///
+/// The shape changed in 12.0.0, without a source-compatible bridge:
+///   * **11.x** returns a nullable `FilePickerResult?` whose `.files` is the
+///     selection; `null` means the user cancelled.
+///   * **12.x / 13.x** return `List<PlatformFile>` directly; an empty list is
+///     cancel.
+///
+/// The SELECTION SEMANTICS changed with it, which matters at the call site:
+/// 11.x defaults `allowMultiple` to `false`; 12.x flips that default to `true`
+/// and deprecates the parameter, and 13.x removes it outright, moving
+/// single-select to a separate `pickFile()`. So from 12.x on `pickFiles()` is
+/// multi-select whatever the caller intended, and anything in this range must
+/// be prepared for MORE THAN ONE file.
+///
+/// Dart has no conditional compilation, so one source file cannot statically
+/// typecheck against both. This function is the SINGLE point where the
+/// difference is absorbed: the argument is typed `Object?` so it accepts either
+/// static type, and every caller sees one shape. Widening the constraint
+/// WITHOUT this would compile here and fail at whichever end the consumer
+/// happens to resolve.
+///
+/// Deliberately tolerant: anything unrecognised reads as "no selection" rather
+/// than throwing, because a picker that cannot be interpreted must not take the
+/// form down — the field simply stays empty, which is the cancel path.
+List<Object?> pickedFilesOf(Object? raw) {
+  if (raw == null) return const [];
+  if (raw is List) return raw;
+  try {
+    final files = (raw as dynamic).files;
+    return files is List ? files : const [];
+  } on NoSuchMethodError {
+    // Not a shape this SDK knows. Narrowed to this ONE exception type so a
+    // genuine fault in a real picker surfaces rather than being reclassified as
+    // "user cancelled". It is not narrowed by ORIGIN — a NoSuchMethodError
+    // raised inside a real `.files` getter would land here too. Accepted
+    // because every supported `.files` is a plain field access, so there is no
+    // getter body for one to come from.
+    return const [];
+  }
+}
+
+/// The one filesystem path this field should adopt from a `pickFiles()` result,
+/// or `null` for "nothing to attach".
+///
+/// Exists as a separate function because the decision it encodes is NOT
+/// obvious and was got wrong once. An `Attach` docfield holds a single file,
+/// but `pickFiles()` can hand back several: 12.x and 13.x removed
+/// `allowMultiple`, so the dialog is always multi-select there regardless of
+/// how it is invoked. Taking `.single` — which is what this code did — threw
+/// `StateError` the moment a user selected two files, and the call site's
+/// catch-all turned that into a silent "attach failed". So: FIRST, not single.
+///
+/// Splitting it out is what makes that testable at all. The call site is a
+/// button callback that invokes the STATIC `FilePicker.pickFiles()`, and a fake
+/// platform cannot be written to typecheck against both majors — the same
+/// reason [pickedFilesOf] is duck-typed. A pure function over the result shape
+/// is the only seam a cross-version test can reach.
+String? pickedPathOf(Object? raw) {
+  final files = pickedFilesOf(raw);
+  if (files.isEmpty) return null;
+  try {
+    final path = (files.first as dynamic).path;
+    return path is String ? path : null;
+  } on NoSuchMethodError {
+    // An entry that is not a PlatformFile: unusable, same as cancel.
+    return null;
+  }
+}
+
 /// Dedicated subdirectory (under the OS temp dir) holding attachments that were
 /// downloaded so an external app could open them. Keeping them in one folder
 /// instead of loose in the temp root makes the cache identifiable and lets the
@@ -291,12 +362,33 @@ class AttachField extends BaseField {
                             // guards `pickFiles` itself, which throws on a
                             // denied storage permission.
                             try {
-                              final result = await FilePicker.pickFiles();
-                              if (result == null ||
-                                  result.files.single.path == null) {
-                                return;
+                              // Normalised across the supported file_picker
+                              // major range, and reduced to the single path
+                              // this field holds — see [pickedPathOf]. Cancel,
+                              // an unreadable shape and a pathless entry all
+                              // arrive here as null.
+                              final files = pickedFilesOf(
+                                await FilePicker.pickFiles(),
+                              );
+                              final path = pickedPathOf(files);
+                              if (path == null) return;
+                              if (files.length > 1) {
+                                // From file_picker 12 the dialog is multi-select
+                                // and cannot be told otherwise — there is no
+                                // single-select call common to the whole
+                                // supported range (11.x has no `pickFile()`,
+                                // 13.x has no `allowMultiple`). So a user can
+                                // genuinely select several files for a field
+                                // that holds one, and taking the first is
+                                // forced rather than chosen. Say so: dropping
+                                // the extras in silence is the same failure
+                                // this replaced, only quieter.
+                                _notify(
+                                  messenger,
+                                  'Only the first file was attached.',
+                                );
                               }
-                              final picked = File(result.files.single.path!);
+                              final picked = File(path);
                               // Durable-copy-first; upload inline when online,
                               // else keep the local path for save-time queueing.
                               //
@@ -317,11 +409,26 @@ class AttachField extends BaseField {
                                 uploadFile: uploadFile,
                               );
                               if (stored != null && stored.isNotEmpty) {
-                                // Reclaim the file this pick replaces.
+                                // The form hears of the file first. The field
+                                // can be disposed while the upload runs (its
+                                // tab page went off screen), and then onChanged
+                                // is the only way the form can: `didChange` on
+                                // a disposed state throws, and it used to run
+                                // first, so the file was dropped.
+                                onChanged?.call(stored);
+                                if (fieldState.mounted) {
+                                  fieldState.didChange(stored);
+                                }
+                                // Reclaim the file this pick replaces, only
+                                // now that the new value is committed: run
+                                // first, a pick that then failed to land had
+                                // already deleted the staged file it replaced.
                                 // Guarded by isStagedPath, so a host path or a
                                 // pending: marker is untouched — and by the
                                 // queue when the host wired a database-backed
-                                // reclaim.
+                                // reclaim. A failure leaves an orphan for the
+                                // sweep; it must not report the file, which is
+                                // attached, as failed.
                                 //
                                 // `current`, NOT `fieldState.value`: before the
                                 // first interaction the form-field value is
@@ -333,9 +440,14 @@ class AttachField extends BaseField {
                                 // hasInteractedByUser-aware value the discard
                                 // path already uses — the two paths disagreeing
                                 // about which value is live is the bug.
-                                await reclaimAttachment(current);
-                                fieldState.didChange(stored);
-                                onChanged?.call(stored);
+                                try {
+                                  await reclaimAttachment(current);
+                                } catch (e, st) {
+                                  sdkLog(
+                                    'AttachField: reclaim of $current failed '
+                                    '— $e\n$st',
+                                  );
+                                }
                                 return;
                               }
                               // Only reachable if the durable copy itself
@@ -420,7 +532,13 @@ class AttachField extends BaseField {
                         : displaySource,
                     isLocal: isLocalFile,
                     isImage: isImage,
-                    headers: imageHeaders,
+                    headers: isServer
+                        ? authHeadersForUrl(
+                            _fullFileUrl(displaySource) ?? displaySource,
+                            imageHeaders,
+                            fileUrlBase,
+                          )
+                        : imageHeaders,
                     // `displaySource`, not `current`: a `pending:<id>` marker
                     // resolves to its durable local file, so the label shows
                     // the real filename not the marker text.

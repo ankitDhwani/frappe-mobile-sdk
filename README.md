@@ -92,7 +92,54 @@ dependencies:
 
 Package page: `https://pub.dev/packages/frappe_mobile_sdk`
 
-From Git:
+### Taking a prerelease
+
+The 2.x line is published as `2.0.0-beta.N`. **A caret on a stable version will
+not give you one:** `2.0.0-beta.4` is ordered *below* `2.0.0`, so `^2.0.0`
+resolves `>=2.0.0 <3.0.0` and skips every beta — and `flutter pub add` writes
+exactly that. Ask for the prerelease explicitly, with a lower bound that is
+itself a prerelease:
+
+```yaml
+dependencies:
+  # >=2.0.0-beta.3 <3.0.0 — takes later betas and the eventual 2.0.0 stable
+  frappe_mobile_sdk: ^2.0.0-beta.3
+```
+
+Pin a single beta if you would rather adopt each one deliberately:
+
+```yaml
+dependencies:
+  frappe_mobile_sdk: 2.0.0-beta.3
+```
+
+Betas are cut from `develop` and are not API-frozen — read
+[`CHANGELOG.md`](CHANGELOG.md) before moving between them.
+
+### Native platform floors
+
+Two dependencies are declared as ranges spanning a major, so a fresh resolve (a
+new app, or any `flutter pub upgrade`) takes the newest allowed version. Those
+carry **native** requirements that pub cannot enforce and `flutter analyze` /
+`flutter test` cannot see, because they live in Gradle and CocoaPods:
+
+| If you resolve | Requirement | Do you need to act? |
+|---|---|---|
+| `flutter_secure_storage` 11.x | Android `minSdk 24` | **No.** Flutter 3.35 — this package's own floor — already defaults `flutter.minSdkVersion` to 24, so an app using `minSdk = flutter.minSdkVersion` is already there. |
+| `flutter_secure_storage` 11.x | `compileSdk` | **No.** 11.2.0 declares `compileSdk = flutter.compileSdkVersion`, so it inherits the app's and cannot exceed it. |
+| `file_picker` 12.x or 13.x | **iOS deployment target 14.0** (via `file_picker_darwin`) | **Yes, if your Podfile is below 14.0.** Raise `platform :ios, '14.0'`. |
+
+One migration note that is not a floor: `flutter_secure_storage` 11.0.0 removed
+`encryptedSharedPreferences` and two cipher algorithms, and data written by an
+earlier version using those options is unreadable afterwards. This SDK calls
+`FlutterSecureStorage()` with default options and is unaffected, but a host that
+passes its own `AndroidOptions` should read that package's changelog before
+upgrading.
+
+To stay on the floor of both ranges instead, pin them in your own `pubspec.yaml`
+— a widened range in this package never forces a major on you.
+
+### From Git
 
 ```yaml
 dependencies:
@@ -102,6 +149,9 @@ dependencies:
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
+      # Both `main` and `develop` currently sit on the same 2.0 beta, so
+      # neither ref is a stable line today. Pin a tag if you need one
+      # version — a branch ref moves under you.
       ref: main
 ```
 
@@ -632,9 +682,20 @@ Before using this SDK, you need to install the **Frappe Mobile Control** app on 
 
 ```yaml
 dependencies:
+  # The 2.x line is in beta; `^2.0.0` would skip it. See "Taking a prerelease".
+  frappe_mobile_sdk: ^2.0.0-beta.3
+```
+
+Or from Git:
+
+```yaml
+dependencies:
   frappe_mobile_sdk:
     git:
       url: https://github.com/dhwani-ris/frappe-mobile-sdk
+      # Both `main` and `develop` currently sit on the same 2.0 beta, so
+      # neither ref is a stable line today. Pin a tag if you need one
+      # version — a branch ref moves under you.
       ref: main
 ```
 
@@ -1103,6 +1164,28 @@ client.doctype.getByName(doctype, name);
 
 // File Upload
 client.attachment.uploadFile(file, doctype: 'Customer', docname: 'CUST-001');
+// The file is stored as uploaded, as with Frappe's upload_file API. Pass
+// `optimize: true` to ask the server for a copy shrunk to at most 1024x768
+// (quality 85), like the per-file toggle in Desk's uploader.
+
+// Opt-in, app-wide: do what Desk's uploader does by default, which is to ask
+// the server to optimise every image over 200 KB that is not an SVG.
+ImageUploadSettings.serverOptimize = true;
+
+// Opt-in, app-wide: shrink photos taken or picked in image fields (Attach
+// Image) on the device before they are stored or uploaded, for faster uploads
+// on slow networks. Off by default. Files picked in an Attach field are not
+// shrunk.
+ImageUploadSettings.captureLimits = const ImageCaptureLimits();
+// Photos are reduced by a whole factor, keeping the long edge at 1920 px or
+// more, and saved as JPEG quality 92. Flutter's image decoder shrinks while it
+// decodes, so the full-size photo is never held in memory. Camera rotation is
+// applied; other EXIF (time, GPS) and the file name are kept. A 12 MP photo
+// becomes about 2000x1500; 8 MP and smaller are left as they are. While a photo
+// is prepared and uploaded, the field shows progress and its buttons are off.
+//
+// Do not turn on both: the server's resize ignores the EXIF rotation, so a
+// portrait photo already turned upright on the device is cut to 512x768.
 
 // Query Builder
 client.doc('ToDo').where('status', 'Open').get();
@@ -1282,3 +1365,5 @@ MIT License - see [LICENSE](LICENSE) file
 <!-- Security scan triggered at 2026-09-10 04:24:05 -->
 
 <!-- Security scan triggered at 2026-09-11 07:33:07 -->
+
+<!-- Security scan triggered at 2026-10-07 11:24:24 -->

@@ -3,7 +3,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import '../../models/doc_field.dart';
 import '../../models/doc_type_meta.dart';
+import '../../models/session_user.dart';
+import '../../utils/data_option_validation.dart';
 import '../../utils/depends_on_evaluator.dart';
+import '../../utils/doc_identity.dart';
+import '../../utils/field_defaults.dart';
+import '../../utils/frappe_save_value.dart';
+import '../../utils/translate.dart';
 import 'dependency_graph.dart';
 import 'field_ui_state.dart';
 import 'form_validators.dart';
@@ -40,9 +46,14 @@ class FormController extends ChangeNotifier {
     Map<String, dynamic>? initialData,
     Map<String, dynamic>? parentData,
     DateTime Function()? now,
+    SessionUser? sessionUser,
+    bool roundNumbersOnSave = false,
   }) : _meta = meta,
        _parentData = parentData,
-       _now = now ?? DateTime.now {
+       _now = now ?? DateTime.now,
+       _sessionUser = sessionUser,
+       _roundNumbersOnSave = roundNumbersOnSave,
+       _newDocument = isNewDocumentData(initialData) {
     _graph = DependencyGraph.build(meta);
     assert(() {
       _graph.assertNoValueCycles();
@@ -54,6 +65,18 @@ class FormController extends ChangeNotifier {
 
   DocTypeMeta _meta; // mutable: reset({meta}) rebuilds against a new schema
   final DateTime Function() _now;
+
+  /// For `__user` / `user_fullname` defaults ([typedDefaultValue]).
+  final SessionUser? _sessionUser;
+
+  /// Rounds numbers to their precision in [buildPayload]'s values
+  /// ([frappeSaveValue]); off by default.
+  final bool _roundNumbersOnSave;
+
+  /// The initial data is not a saved document ([isNewDocumentData]); only
+  /// then are fields given their defaults ([typedDefaultValue]). Recomputed
+  /// by [reset].
+  bool _newDocument;
   late DependencyGraph _graph;
 
   /// Parent document values, supplying `parent` to depends_on expressions on a
@@ -113,6 +136,9 @@ class FormController extends ChangeNotifier {
     'idx',
     '__islocal',
     '__unsaved',
+    // A record read from the offline store names itself here, not in `name`;
+    // the saved-document checks (`__islocal`, set_only_once) need to see it.
+    'server_name',
   };
 
   // ── construction helpers ────────────────────────────────────────────────
@@ -151,8 +177,9 @@ class FormController extends ChangeNotifier {
     //
     // An explicit `__islocal` from the host wins — it was seeded above.
     if (!_rawValues.containsKey('__islocal')) {
-      final docName = _rawValues['name'];
-      if (docName == null || docName.toString().isEmpty) {
+      // A record read from the offline store carries `server_name`, not
+      // `name`; it is saved all the same.
+      if (!isSavedOnServer(_rawValues)) {
         _rawValues['__islocal'] = 1;
       }
     }
@@ -163,16 +190,12 @@ class FormController extends ChangeNotifier {
         _rawValues[name] = initialData[name];
         continue;
       }
-      final def = f.defaultValue;
-      if (def != null &&
-          f.fieldtype == 'Date' &&
-          def.toLowerCase() == 'today') {
-        final d = _now();
-        _rawValues[name] =
-            '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-      } else {
-        _rawValues[name] = def;
-      }
+      _rawValues[name] = typedDefaultValue(
+        f,
+        user: _sessionUser,
+        now: _now,
+        newDocument: _newDocument,
+      );
     }
   }
 
@@ -470,7 +493,13 @@ class FormController extends ChangeNotifier {
       (e) => e.fieldname == field,
       orElse: () => DocField(fieldtype: '_missing_'),
     );
-    if (!_isDynamic(f) && !f.reqd && !f.readOnly) return FieldUiState.editable;
+    if (!_isDynamic(f) &&
+        !f.reqd &&
+        !f.readOnly &&
+        !f.isVirtual &&
+        !f.setOnlyOnce) {
+      return FieldUiState.editable;
+    }
     // `depends_on` keeps the `defaultOnError: true` default — an unparseable
     // expression SHOWS the field rather than silently hiding data.
     final visible = DependsOnEvaluator.evaluate(
@@ -494,8 +523,12 @@ class FormController extends ChangeNotifier {
           false,
           parentData: _parentData,
         );
+    // Desk get_field_display_status: a virtual field is never written, and a
+    // set_only_once field is read-only once the document is saved.
     final readOnly =
         f.readOnly ||
+        f.isVirtual ||
+        (f.setOnlyOnce && isSavedOnServer(_rawValues)) ||
         DependsOnEvaluator.evaluate2(
           f.readOnlyDependsOn,
           _rawValues,
@@ -552,7 +585,8 @@ class FormController extends ChangeNotifier {
     return e == null;
   }
 
-  /// Priority per field (first non-null wins): reqd -> sync field validators.
+  /// Priority per field (first non-null wins): reqd -> server rules
+  /// (non_negative, Data options) -> sync field validators.
   /// Async runs only in validateAsync(); cross-field runs in validate().
   String? _validateField(String field) {
     final f = _meta.fields.firstWhere(
@@ -577,6 +611,18 @@ class FormController extends ChangeNotifier {
         (v is! List && v is! String && v.toString().isEmpty);
     if ((f.reqd || ui.required) && missing) {
       return '${f.label ?? field} is required';
+    }
+    // Frappe `non_negative` (`Document._validate_non_negative`): same rule and
+    // wording as the legacy FrappeFormBuilder submit sweep. Reactive submit
+    // never runs the field widgets' validators, so without this a negative
+    // value saves locally and is only rejected by the server at sync time.
+    if (f.rejectsAsNegative(v)) {
+      return sdkTr('Value cannot be negative for {0}', [f.displayLabel]);
+    }
+    // Data with options Email / Phone / Name / URL: the server's checks.
+    if (f.fieldtype == 'Data' && v is String) {
+      final e = dataOptionError(f.options, v);
+      if (e != null) return e;
     }
     for (final validator in _fieldValidators[field] ?? const []) {
       final e = validator(v, _rawValues);
@@ -660,13 +706,32 @@ class FormController extends ChangeNotifier {
               ? 0
               : (f.fieldtype == 'Table' || f.fieldtype == 'Table MultiSelect')
               ? <dynamic>[]
-              : (f.defaultValue ?? ''));
+              : (typedDefaultValue(
+                      f,
+                      user: _sessionUser,
+                      now: _now,
+                      newDocument: _newDocument,
+                    ) ??
+                    ''));
     }
     // also carry non-null companion/extra keys present in raw values, minus the
     // std fields seeded purely so depends_on can read them (see _stdEvalFields)
     _rawValues.forEach((k, v) {
       if (v != null && !_stdEvalFields.contains(k)) complete[k] = v;
     });
+    // Values the way Desk holds them at save: dates in Frappe's format and
+    // empty as null; numbers rounded to their precision only when the host
+    // asked for it (roundNumbersOnSave).
+    for (final f in _meta.fields) {
+      final name = f.fieldname;
+      if (name != null && complete.containsKey(name)) {
+        complete[name] = frappeSaveValue(
+          f,
+          complete[name],
+          roundNumbers: _roundNumbersOnSave,
+        );
+      }
+    }
 
     // The payload must not carry the std fields, but the visibility sweep below
     // MUST still see them. Evaluating `eval:doc.docstatus == 0` against a scope
@@ -879,6 +944,9 @@ class FormController extends ChangeNotifier {
     for (final k in _uiNotifiers.keys.toList()) {
       if (!surviving.contains(k)) _uiNotifiers.remove(k)!.dispose();
     }
+    // New or saved is decided by the data being reset to, as in the
+    // constructor: reset to a saved document gives no defaults.
+    _newDocument = isNewDocumentData(initialData);
     _seedDefaults(initialData); // re-seed (overwrites surviving values)
     for (final e in _valueNotifiers.entries) {
       e.value.value = _rawValues[e.key];

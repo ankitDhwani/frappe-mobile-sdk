@@ -8,6 +8,12 @@ class DocField {
   final String fieldtype;
   final String? label;
   final bool reqd;
+
+  /// Frappe `non_negative=1` on an Int / Float / Currency / Percent field: the
+  /// server rejects a negative value on save (`Document._validate_non_negative`),
+  /// so the form rejects it first. Ignored on other fieldtypes, as in Frappe.
+  final bool nonNegative;
+
   final bool readOnly;
   final bool hidden;
   final String? options;
@@ -35,6 +41,22 @@ class DocField {
   /// Selecting it would send an unknown column to the server, so callers that
   /// build column lists must skip it.
   final bool isVirtual;
+
+  /// Frappe `cannot_add_rows=1` on a Table field: the user may edit existing
+  /// rows but not add new ones (Desk hides the grid's "Add Row").
+  final bool cannotAddRows;
+
+  /// Frappe `cannot_delete_rows=1` on a Table field: the user may edit
+  /// existing rows but not remove them (Desk hides the grid's delete).
+  final bool cannotDeleteRows;
+
+  /// Frappe `set_only_once=1`: the value can be set while the document is new
+  /// and is read-only once it is saved (Desk `get_field_display_status`; the
+  /// server rejects a change with `CannotChangeConstantError`). Read from
+  /// [rawData], so it survives `toJson`/`fromJson` round trips.
+  bool get setOnlyOnce =>
+      frappe_json.parseBool(rawData?['set_only_once']) ||
+      frappe_json.parseBool(rawData?['setOnlyOnce']);
 
   /// The raw docfield payload this instance was parsed from, if any.
   ///
@@ -66,6 +88,7 @@ class DocField {
     'fieldtype',
     'label',
     'reqd',
+    'non_negative', 'nonNegative',
     'read_only', 'readOnly',
     'hidden',
     'options',
@@ -85,6 +108,8 @@ class DocField {
     'allow_multiple', 'allowMultiple',
     'search_index', 'searchIndex',
     'is_virtual', 'isVirtual',
+    'cannot_add_rows', 'cannotAddRows',
+    'cannot_delete_rows', 'cannotDeleteRows',
 
     // NOT a scalar property: Frappe puts a nested `fields` list on every
     // docfield (the child doctype's own columns, for a Table field). It is
@@ -104,6 +129,7 @@ class DocField {
     required this.fieldtype,
     this.label,
     this.reqd = false,
+    this.nonNegative = false,
     this.readOnly = false,
     this.hidden = false,
     this.options,
@@ -123,6 +149,8 @@ class DocField {
     this.allowMultiple = false,
     this.searchIndex = false,
     this.isVirtual = false,
+    this.cannotAddRows = false,
+    this.cannotDeleteRows = false,
     this.rawData,
   });
 
@@ -151,6 +179,8 @@ class DocField {
       fieldtype: json['fieldtype'] as String? ?? 'Data',
       label: json['label'] as String?,
       reqd: parseBool(json['reqd']),
+      nonNegative:
+          parseBool(json['non_negative']) || parseBool(json['nonNegative']),
       readOnly: parseBool(json['read_only']) || parseBool(json['readOnly']),
       hidden: parseBool(json['hidden']),
       options: json['options'] as String?,
@@ -182,6 +212,12 @@ class DocField {
       searchIndex:
           parseBool(json['search_index']) || parseBool(json['searchIndex']),
       isVirtual: parseBool(json['is_virtual']) || parseBool(json['isVirtual']),
+      cannotAddRows:
+          parseBool(json['cannot_add_rows']) ||
+          parseBool(json['cannotAddRows']),
+      cannotDeleteRows:
+          parseBool(json['cannot_delete_rows']) ||
+          parseBool(json['cannotDeleteRows']),
       rawData: json,
     );
   }
@@ -214,6 +250,9 @@ class DocField {
       'fieldtype': fieldtype,
       if (label != null) 'label': label,
       'reqd': reqd ? 1 : 0,
+      // Always emitted: DocTypeMeta.toJson() is what MetaService persists, so
+      // dropping the key would lose the flag on the next cold start.
+      'non_negative': nonNegative ? 1 : 0,
       'read_only': readOnly ? 1 : 0,
       'hidden': hidden ? 1 : 0,
       if (options != null) 'options': options,
@@ -238,7 +277,31 @@ class DocField {
       // would silently drop the flag on the next cold start and re-emit the
       // virtual column in a ['*'] expansion.
       'is_virtual': isVirtual ? 1 : 0,
+      'cannot_add_rows': cannotAddRows ? 1 : 0,
+      'cannot_delete_rows': cannotDeleteRows ? 1 : 0,
     };
+  }
+
+  /// The fieldtypes Frappe applies `non_negative` to.
+  static const Set<String> nonNegativeFieldtypes = {
+    'Int',
+    'Float',
+    'Currency',
+    'Percent',
+  };
+
+  /// True when Frappe would reject [value] for this field on save: the flag is
+  /// set, the fieldtype is numeric, and the value is below zero. Mirrors
+  /// Frappe's `flt(value) < 0`: commas are dropped, and a value that does not
+  /// parse counts as 0.
+  bool rejectsAsNegative(dynamic value) {
+    if (!nonNegative || !nonNegativeFieldtypes.contains(fieldtype)) {
+      return false;
+    }
+    final n = value is num
+        ? value
+        : num.tryParse('${value ?? ''}'.replaceAll(',', '').trim());
+    return n != null && n < 0;
   }
 
   /// Check if this is a layout field (Section Break, Column Break, Tab Break)

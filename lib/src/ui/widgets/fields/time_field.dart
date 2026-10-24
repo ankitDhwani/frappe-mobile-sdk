@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:intl/intl.dart';
+import '../../../utils/date_helpers.dart';
 import 'base_field.dart';
 import 'field_helpers.dart';
 
@@ -58,12 +59,8 @@ class TimeField extends BaseField {
       validator: field.reqd
           ? (value) => requiredValidator(value, field.displayLabel)
           : null,
-      onChanged: (val) {
-        if (val != null) {
-          final timeStr = DateFormat('HH:mm:ss').format(val);
-          onChanged?.call(timeStr);
-        }
-      },
+      // Cleared reports null, so the stored time is cleared too.
+      onChanged: (val) => onChanged?.call(val == null ? null : frappeTime(val)),
     );
   }
 }

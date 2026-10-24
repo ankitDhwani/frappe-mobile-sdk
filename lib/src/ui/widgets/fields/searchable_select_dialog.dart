@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../../database/entities/link_option_entity.dart';
+import 'link_remote_search.dart';
 
 class SearchableSelectDialog extends StatefulWidget {
   final List<LinkOptionEntity> options;
@@ -7,12 +8,27 @@ class SearchableSelectDialog extends StatefulWidget {
   final bool multiSelect;
   final String? title;
 
+  /// Server search for options beyond [options]; see [SearchableSelect.onSearch].
+  final Future<List<LinkOptionEntity>> Function(String text)? onSearch;
+  final Duration searchDebounce;
+  final int searchMinChars;
+  final bool optionsComplete;
+
+  /// Called with the picked option before the dialog closes, so a caller can
+  /// keep an option that came from [onSearch].
+  final ValueChanged<LinkOptionEntity>? onPickOption;
+
   const SearchableSelectDialog({
     super.key,
     required this.options,
     required this.initialSelected,
     required this.multiSelect,
     this.title,
+    this.onSearch,
+    this.searchDebounce = const Duration(milliseconds: 500),
+    this.searchMinChars = 2,
+    this.optionsComplete = true,
+    this.onPickOption,
   });
 
   @override
@@ -22,23 +38,52 @@ class SearchableSelectDialog extends StatefulWidget {
 class _SearchableSelectDialogState extends State<SearchableSelectDialog> {
   String _searchQuery = '';
   late List<String> _selected;
+  LinkRemoteSearch? _remote;
 
   @override
   void initState() {
     super.initState();
     _selected = List.from(widget.initialSelected);
+    final search = widget.onSearch;
+    if (search != null) {
+      _remote = LinkRemoteSearch(
+        search: search,
+        debounce: widget.searchDebounce,
+        minChars: widget.searchMinChars,
+        onUpdate: () {
+          if (mounted) setState(() {});
+        },
+      );
+    }
   }
 
-  void _toggleSelection(String value) {
+  @override
+  void dispose() {
+    _remote?.dispose();
+    super.dispose();
+  }
+
+  bool _resolvesLocally(String text) => LinkRemoteSearch.resolvesLocally(
+    widget.options,
+    text,
+    complete: widget.optionsComplete,
+  );
+
+  void _toggleSelection(LinkOptionEntity option) {
+    final value = option.name;
     setState(() {
       if (widget.multiSelect) {
         if (_selected.contains(value)) {
           _selected.remove(value);
         } else {
           _selected.add(value);
+          // A row from the server search is not in [options]: report it so
+          // the caller can keep its label once the dialog closes.
+          widget.onPickOption?.call(option);
         }
       } else {
         _selected = [value];
+        widget.onPickOption?.call(option);
         Navigator.of(context).pop(_selected);
       }
     });
@@ -46,13 +91,19 @@ class _SearchableSelectDialogState extends State<SearchableSelectDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final filteredOptions = widget.options.where((option) {
-      if (_searchQuery.isEmpty) return true;
-      final labelLower = (option.label ?? option.name).toLowerCase();
-      final nameLower = option.name.toLowerCase();
-      final queryLower = _searchQuery.toLowerCase();
-      return labelLower.contains(queryLower) || nameLower.contains(queryLower);
-    }).toList();
+    final filteredOptions = LinkRemoteSearch.merge(
+      widget.options.where((option) {
+        if (_searchQuery.isEmpty) return true;
+        final labelLower = (option.label ?? option.name).toLowerCase();
+        final nameLower = option.name.toLowerCase();
+        final queryLower = _searchQuery.toLowerCase();
+        return labelLower.contains(queryLower) ||
+            nameLower.contains(queryLower);
+      }).toList(),
+      _remote?.resultsFor(_searchQuery),
+    );
+    final searching = _remote?.searching ?? false;
+    final error = _remote?.error;
 
     return AlertDialog(
       title: Text(widget.title ?? 'Select Options'),
@@ -80,9 +131,19 @@ class _SearchableSelectDialogState extends State<SearchableSelectDialog> {
                   setState(() {
                     _searchQuery = value;
                   });
+                  _remote?.update(
+                    value,
+                    resolvedLocally: _resolvesLocally(value),
+                  );
                 },
               ),
             ),
+            if (searching) const LinearProgressIndicator(minHeight: 2),
+            if (error != null)
+              TextButton(
+                onPressed: () => _remote?.retry(_searchQuery),
+                child: const Text('Search failed. Tap to retry'),
+              ),
             const Divider(),
             Expanded(
               child: ListView.builder(
@@ -97,7 +158,7 @@ class _SearchableSelectDialogState extends State<SearchableSelectDialog> {
                       title: Text(option.label ?? option.name),
                       value: isSelected,
                       onChanged: (bool? checked) {
-                        _toggleSelection(option.name);
+                        _toggleSelection(option);
                       },
                     );
                   } else {
@@ -107,7 +168,7 @@ class _SearchableSelectDialogState extends State<SearchableSelectDialog> {
                           ? const Icon(Icons.check, color: Colors.blue)
                           : null,
                       onTap: () {
-                        _toggleSelection(option.name);
+                        _toggleSelection(option);
                       },
                     );
                   }

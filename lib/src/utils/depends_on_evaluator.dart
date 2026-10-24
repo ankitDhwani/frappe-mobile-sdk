@@ -3,6 +3,7 @@
 
 import 'package:flutter/foundation.dart';
 
+import 'doc_identity.dart';
 import 'js_expression.dart';
 import 'sdk_log.dart';
 
@@ -233,9 +234,7 @@ class DependsOnEvaluator {
   static Map<String, dynamic> _evalScope(Map<String, dynamic> src) => {
     ...src,
     if (src['docstatus'] == null) 'docstatus': 0,
-    if (src['__islocal'] == null &&
-        (src['name'] == null || src['name'].toString().isEmpty))
-      '__islocal': 1,
+    if (src['__islocal'] == null && !isSavedOnServer(src)) '__islocal': 1,
   };
 
   /// Expressions already reported by [_logOnce].

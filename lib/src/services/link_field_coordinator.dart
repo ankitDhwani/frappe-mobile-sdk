@@ -322,6 +322,7 @@ class LinkFieldCoordinator {
 
     for (final field in independent) {
       if (field.fieldname == null || field.options == null) continue;
+      if (_searchesServer(field.options!)) continue;
       requestFetch(
         field.options!,
         filters: LinkOptionService.resolveFilters(
@@ -341,6 +342,7 @@ class LinkFieldCoordinator {
 
     for (final field in sortedDependent) {
       if (field.fieldname == null || field.options == null) continue;
+      if (_searchesServer(field.options!)) continue;
       if (!canFetchNow(field, _formData)) continue;
       final filters = LinkOptionService.resolveFilters(
         field: field,
@@ -359,6 +361,19 @@ class LinkFieldCoordinator {
         fieldLabel: field.displayLabel,
         fieldname: field.fieldname,
       );
+    }
+  }
+
+  /// A picker whose target is searched on the server loads its own short first
+  /// page ([LinkOptionService.usesServerSearch]) and never reads this
+  /// coordinator's cache, so prefetching its full list would only download up
+  /// to 5000 rows nobody uses. A service that cannot answer prefetches as
+  /// before.
+  bool _searchesServer(String doctype) {
+    try {
+      return linkOptionService.usesServerSearch(doctype);
+    } catch (_) {
+      return false;
     }
   }
 

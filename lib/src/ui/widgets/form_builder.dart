@@ -13,8 +13,13 @@ import '../../models/link_filter_result.dart';
 import '../../constants/field_types.dart';
 import '../../services/link_option_service.dart';
 import '../../services/link_field_coordinator.dart';
+import '../../models/session_user.dart';
+import '../../utils/date_helpers.dart';
 import '../../utils/depends_on_evaluator.dart';
+import '../../utils/doc_identity.dart';
+import '../../utils/field_defaults.dart';
 import '../../utils/field_normalizer.dart';
+import '../../utils/frappe_save_value.dart';
 import '../../utils/sdk_log.dart';
 import '../../utils/translate.dart';
 import '../../services/mobile_creation_capture.dart';
@@ -22,6 +27,7 @@ import 'fields/child_table_field.dart';
 import 'fields/field_factory.dart';
 import 'fields/base_field.dart';
 import 'default_form_style.dart';
+import 'pending_field_work.dart';
 import '../form/form_controller.dart';
 import '../form/field_ui_state.dart';
 
@@ -216,6 +222,18 @@ class FrappeFormBuilder extends StatefulWidget {
   /// row-level capture.
   final MobileCreationCapture? creationCapture;
 
+  /// The signed-in user, for `__user`, `user` and `user_fullname` defaults on
+  /// a new document (see [typedDefaultValue]). Null leaves those fields unset
+  /// for the server to fill on insert.
+  final SessionUser? sessionUser;
+
+  /// Round Float, Currency and Percent values to their `precision` in the
+  /// saved payload, as Desk's controls do. OFF by default (what 2.0.0-beta.4
+  /// sent): see [frappeSaveValue] for when rounding only at save breaks a
+  /// server check. Turn it on when the host's scripts do not compute values
+  /// from the unrounded figure.
+  final bool roundNumbersOnSave;
+
   /// Custom styling options
   final FrappeFormStyle? style;
 
@@ -345,6 +363,8 @@ class FrappeFormBuilder extends StatefulWidget {
     this.useLinkFieldCoordinator = true,
     this.customFieldFactory,
     this.creationCapture,
+    this.sessionUser,
+    this.roundNumbersOnSave = false,
     this.childRowNoticeBuilder,
     this.style,
     this.uploadFile,
@@ -405,6 +425,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   StreamSubscription<LinkLoadProgress>? _progressSubscription;
   bool _linkOptionsLoading = false;
   String? _linkOptionsLoadingMessage;
+  final PendingFieldWork _pendingFieldWork = PendingFieldWork();
+  bool _waitingForFieldWork = false;
   final Map<String, dynamic> _formData = {};
 
   /// > 0 while a programmatic-patch `patchValue` is being applied under
@@ -494,6 +516,11 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     // Frappe stores Single doctypes as mediumtext and exempts them from the
     // implicit Data varchar(140) cap.
     _fieldFactory.capDataLength = !widget.meta.isSingle;
+    // Un-scrubbed DocType name. Lets the factory recognise the `is_tree`
+    // `parent_<scrubbed doctype>` Link — the only reserved fieldname that is
+    // not the same on every DocType — and keep the single-option preselect off
+    // it. See [FieldFactory.doctype].
+    _fieldFactory.doctype = widget.meta.name;
     _fieldFactory.errorTextResolver = _inlineTableErrorFor;
     _fieldFactory.creationCapture = widget.creationCapture;
     // The six attachment capabilities below are assigned ONLY when this widget
@@ -600,21 +627,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     _formKey = GlobalKey<FormBuilderState>();
 
     _formData.addAll(widget.initialData ?? {});
-
-    for (final field in widget.meta.fields) {
-      if (field.fieldname != null && !_formData.containsKey(field.fieldname)) {
-        final defVal = field.defaultValue;
-        if (defVal != null &&
-            field.fieldtype == 'Date' &&
-            defVal.toLowerCase() == 'today') {
-          final now = DateTime.now();
-          _formData[field.fieldname!] =
-              '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-        } else {
-          _formData[field.fieldname!] ??= defVal;
-        }
-      }
-    }
+    _seedDefaults();
 
     _prefetchChildRowMeta();
 
@@ -670,6 +683,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
             meta: widget.meta,
             initialData: widget.initialData,
             parentData: widget.parentFormData,
+            sessionUser: widget.sessionUser,
+            roundNumbersOnSave: widget.roundNumbersOnSave,
           );
       _ownsController = widget.controller == null;
       // A host-supplied controller never saw the constructor argument above, so
@@ -705,6 +720,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   Future<void> _handleReactiveSubmit() async {
     final c = _controller;
     if (c == null) return;
+    if (_pendingFieldWork.isBusy && !await _waitForFieldWork()) return;
     // Await async/server/duplicate validators before committing the submit.
     if (await c.validateAsync()) {
       widget.onSubmit?.call(c.buildSubmitData());
@@ -1105,6 +1121,10 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
   bool _isFieldReadOnly(DocField field) =>
       field.readOnly ||
+      // Desk get_field_display_status: a virtual field is never written, and
+      // a set_only_once field is read-only once the document is saved.
+      field.isVirtual ||
+      (field.setOnlyOnce && isSavedOnServer(widget.initialData)) ||
       // Likewise, never lock a field because an expression failed to parse.
       _evaluateDepends(field.readOnlyDependsOn, false, onError: false);
 
@@ -1245,16 +1265,22 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
   /// Returns a copy of [field] with the effective reqd/readOnly folded in.
   /// Shared by the legacy and reactive build paths.
+  ///
+  /// [keepDefault] false drops `default` from the copy, so a field widget
+  /// with no value does not fall back to showing (and validating) a default
+  /// the save will not send.
   DocField _withEffectiveProps(
     DocField field,
     bool effectiveReqd,
-    bool effectiveReadOnly,
-  ) {
+    bool effectiveReadOnly, {
+    bool keepDefault = true,
+  }) {
     return DocField(
       fieldname: field.fieldname,
       fieldtype: field.fieldtype,
       label: field.label,
       reqd: effectiveReqd,
+      nonNegative: field.nonNegative,
       readOnly: effectiveReadOnly,
       hidden: field.hidden,
       options: field.options,
@@ -1264,7 +1290,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       linkFilters: field.linkFilters,
       fetchFrom: field.fetchFrom,
       section: field.section,
-      defaultValue: field.defaultValue,
+      defaultValue: keepDefault ? field.defaultValue : null,
       description: field.description,
       placeholder: field.placeholder,
       precision: field.precision,
@@ -1273,6 +1299,8 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       inListView: field.inListView,
       allowMultiple: field.allowMultiple,
       searchIndex: field.searchIndex,
+      cannotAddRows: field.cannotAddRows,
+      cannotDeleteRows: field.cannotDeleteRows,
     );
   }
 
@@ -1597,16 +1625,19 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     final fieldStyle = _fieldStyleFor(field, effectiveReqd, formStyle);
 
+    // A saved document gets no defaults, so its field widgets must not show
+    // one either.
     final fieldWithEffectiveProps = _withEffectiveProps(
       field,
       effectiveReqd,
       effectiveReadOnly,
+      keepDefault: isNewDocumentData(widget.initialData),
     );
 
     final initialValue =
         _formData[field.fieldname] ??
         widget.initialData?[field.fieldname] ??
-        field.defaultValue;
+        _defaultFor(field);
 
     final fieldWidget = _fieldFactory.createField(
       field: fieldWithEffectiveProps,
@@ -2016,13 +2047,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       if (widget.initialData != null) {
         _formData.addAll(widget.initialData!);
       }
-      for (final field in widget.meta.fields) {
-        if (field.fieldname != null &&
-            !field.hidden &&
-            !_formData.containsKey(field.fieldname)) {
-          _formData[field.fieldname!] ??= field.defaultValue;
-        }
-      }
+      _seedDefaults();
       if (widget.linkOptionService != null && widget.useLinkFieldCoordinator) {
         _linkFieldCoordinator = LinkFieldCoordinator(
           meta: widget.meta,
@@ -2073,7 +2098,30 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     super.dispose();
   }
 
+  /// Waits for field work that is still running, such as a photo that is
+  /// uploading, so a submit does not read the field from before it landed.
+  /// False when the form went away meanwhile, or when a submit is already
+  /// waiting, so a second tap does not submit twice.
+  Future<bool> _waitForFieldWork() async {
+    if (_waitingForFieldWork) return false;
+    _waitingForFieldWork = true;
+    try {
+      await _pendingFieldWork.whenIdle();
+    } finally {
+      _waitingForFieldWork = false;
+    }
+    return mounted;
+  }
+
   void _handleSubmit() {
+    if (_pendingFieldWork.isBusy) {
+      unawaited(
+        _waitForFieldWork().then((proceed) {
+          if (proceed) _handleSubmit();
+        }),
+      );
+      return;
+    }
     final state = _formKey.currentState;
     if (state == null) return;
 
@@ -2168,7 +2216,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         completeFormData[field.fieldname!] =
             formValues[field.fieldname] ??
             widget.initialData?[field.fieldname] ??
-            field.defaultValue ??
+            _defaultFor(field) ??
             (field.fieldtype == 'Check'
                 ? 0
                 : (field.fieldtype == 'Table' ||
@@ -2187,6 +2235,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         completeFormData[entry.key] = entry.value;
       }
     }
+    _toFrappeSaveValues(completeFormData);
 
     // Drop fields the user can't actually see from the save payload,
     // mirroring Frappe Desk's behaviour where hidden-by-depends_on fields
@@ -2335,6 +2384,40 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
       return;
     }
 
+    // Frappe-parity non-negative sweep (`Document._validate_non_negative`)
+    // over the same COMPLETE payload, for the same reason as the mandatory
+    // sweep above: a flagged field on a tab that was never opened has no
+    // mounted validator, so a negative value would save locally and only be
+    // rejected by the server at sync time.
+    final negative = <DocField>[
+      for (final field in widget.meta.fields)
+        if (field.fieldname != null &&
+            completeFormData.containsKey(field.fieldname) &&
+            field.rejectsAsNegative(completeFormData[field.fieldname]))
+          field,
+    ];
+    if (negative.isNotEmpty) {
+      final tabIndex = _fieldTabIndex[negative.first.fieldname];
+      if (tabIndex != null &&
+          _tabs.length > 1 &&
+          _tabController.index != tabIndex) {
+        setState(() {
+          _tabController.index = tabIndex;
+        });
+      }
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (!mounted) return;
+        final st = _formKey.currentState;
+        for (final f in negative) {
+          st?.fields[f.fieldname]?.invalidate(
+            sdkTr('Value cannot be negative for {0}', [f.displayLabel]),
+          );
+        }
+      });
+      widget.onValidationFailed?.call();
+      return;
+    }
+
     // Row-level mandatory cells, which no layer above can see: the parent
     // sweep judges a `Table` only by whether the LIST is empty.
     final childRowErrors = _missingChildRowMandatories(
@@ -2366,6 +2449,29 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   /// Warms [_childRowMeta] for every `Table` field so the submit-time row
   /// sweep can run synchronously. Failures are swallowed on purpose: a table
   /// whose meta never arrives is simply not row-checked.
+  /// Gives every field the form has no value for its default, as Desk does
+  /// for a new document (`frappe.model.set_default_values`): typed by field
+  /// type ([typedDefaultValue]), `Today` on a Date resolved to today's date,
+  /// and hidden fields included. A saved document gets no defaults
+  /// ([_defaultFor] is null). Runs on first build and again whenever the form
+  /// is reloaded with new data, so both start the same way.
+  void _seedDefaults() {
+    for (final field in widget.meta.fields) {
+      final name = field.fieldname;
+      if (name == null || _formData.containsKey(name)) continue;
+      _formData[name] = _defaultFor(field);
+    }
+  }
+
+  /// [field]'s default for a new document: tokens resolved for
+  /// [FrappeFormBuilder.sessionUser], then typed ([typedDefaultValue]). Null
+  /// when [FrappeFormBuilder.initialData] is a saved document.
+  Object? _defaultFor(DocField field) => typedDefaultValue(
+    field,
+    user: widget.sessionUser,
+    newDocument: isNewDocumentData(widget.initialData),
+  );
+
   void _prefetchChildRowMeta() {
     final getMeta = widget.getMeta;
     if (getMeta == null) return;
@@ -2482,7 +2588,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         complete[field.fieldname!] =
             formValues[field.fieldname] ??
             widget.initialData?[field.fieldname] ??
-            field.defaultValue ??
+            _defaultFor(field) ??
             (field.fieldtype == 'Check'
                 ? 0
                 : (field.fieldtype == 'Table' ||
@@ -2496,7 +2602,41 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         complete[entry.key] = entry.value;
       }
     }
+    _toFrappeSaveValues(complete);
     return complete;
+  }
+
+  /// The form-wide initial values handed to [FormBuilder]. A date, datetime or
+  /// time picker falls back to this map when its own value is empty, and it can
+  /// only hold a [DateTime], so stored text is converted here and an empty
+  /// value becomes null (`''` used to crash the field on re-open).
+  Map<String, dynamic> _pickerSafeValues(Map<String, dynamic> values) {
+    final out = Map<String, dynamic>.from(values);
+    for (final f in widget.meta.fields) {
+      final name = f.fieldname;
+      if (name != null &&
+          temporalFieldtypes.contains(f.fieldtype) &&
+          out.containsKey(name)) {
+        out[name] = pickerDateTime(f.fieldtype, out[name]);
+      }
+    }
+    return out;
+  }
+
+  /// Values in [data] the way Desk holds them at save ([frappeSaveValue]):
+  /// dates in Frappe's format and empty as null; numbers with a precision
+  /// rounded to it only when [FrappeFormBuilder.roundNumbersOnSave] is on.
+  void _toFrappeSaveValues(Map<String, dynamic> data) {
+    for (final f in widget.meta.fields) {
+      final name = f.fieldname;
+      if (name != null && data.containsKey(name)) {
+        data[name] = frappeSaveValue(
+          f,
+          data[name],
+          roundNumbers: widget.roundNumbersOnSave,
+        );
+      }
+    }
   }
 
   /// Builds current form data (same structure as submit). Used for dirty detection.
@@ -2513,7 +2653,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
     widget.registerSubmit?.call(_handleReactiveSubmit);
     return FormBuilder(
       key: _formKey,
-      initialValue: _controller!.values,
+      initialValue: _pickerSafeValues(_controller!.values),
       child: Column(
         children: [
           _buildTabHeader(formStyle),
@@ -2568,10 +2708,15 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
         // Form-level readOnly (e.g. workflow freeze) must disable every field,
         // mirroring the legacy path (`_isFieldReadOnly(field) || widget.readOnly`).
         final effectiveReadOnly = ui.readOnly || widget.readOnly;
+        // The controller already holds every default a new document gets.
+        // A widget showing `default` for a null value (a saved document's
+        // empty field) would be patched back to empty after the first frame,
+        // and that patch would reach the controller as a user edit.
         final effective = _withEffectiveProps(
           field,
           ui.required,
           effectiveReadOnly,
+          keepDefault: false,
         );
         final fieldStyle = _fieldStyleFor(field, ui.required, formStyle);
         final value = c.getValue(name);
@@ -2727,7 +2872,12 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => PendingFieldWorkScope(
+    tracker: _pendingFieldWork,
+    child: _buildForm(context),
+  );
+
+  Widget _buildForm(BuildContext context) {
     // Drop the per-build eval-data memo. Safe as a build-scoped cache because
     // every reader (`_shouldShowField` / `_isFieldRequired` /
     // `_isFieldReadOnly`, via `_hasAnyVisibleField`, `_buildFieldWidget` and
@@ -2757,7 +2907,7 @@ class _FrappeFormBuilderState extends State<FrappeFormBuilder>
 
     return FormBuilder(
       key: _formKey,
-      initialValue: Map<String, dynamic>.from(_formData),
+      initialValue: _pickerSafeValues(_formData),
       child: Column(
         children: [
           if (_linkOptionsLoading)

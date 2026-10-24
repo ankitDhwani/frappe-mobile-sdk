@@ -43,3 +43,43 @@ jobs:
 
       - name: Test
         run: flutter test
+
+  # The committed root `pubspec.lock` pins the FLOOR of every range, so the job
+  # above only ever proves the low end. This one resolves the CEILING, which is
+  # where a widened constraint actually earns its keep — and where a new adopter
+  # or anyone running `pub upgrade` lands. Without it, "compatible with the
+  # newest major" is a claim backed by one person's laptop on one afternoon.
+  #
+  # `continue-on-error` on purpose: an upstream release can break this at any
+  # time through no fault of a contributor's change, and a red X on an unrelated
+  # PR trains people to ignore CI. It reports, it does not gate.
+  upper-bound:
+    name: Resolve dependency ceiling
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.38.9"
+          channel: "stable"
+          cache: true
+
+      - name: Prepare example app config
+        run: |
+          if [ -f "example/lib/config/app_config.example.dart" ]; then
+            cp example/lib/config/app_config.example.dart example/lib/config/app_config.dart
+          fi
+
+      - name: Resolve newest allowed versions
+        run: flutter pub upgrade
+
+      - name: Show what resolved
+        run: flutter pub deps --style=compact | head -40
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Test
+        run: flutter test

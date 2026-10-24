@@ -167,4 +167,92 @@ void main() {
     final tf = tester.widget<TextField>(find.byType(TextField));
     expect(tf.enabled, isFalse);
   });
+  group('non_negative (Frappe docfield flag)', () {
+    Future<GlobalKey<FormBuilderState>> pumpFlagged(
+      WidgetTester tester, {
+      bool reqd = false,
+      bool nonNegative = true,
+      String fieldtype = 'Float',
+    }) async {
+      final formKey = GlobalKey<FormBuilderState>();
+      await _pumpNum(
+        tester,
+        field: DocField(
+          fieldname: 'height',
+          fieldtype: fieldtype,
+          label: 'Height',
+          reqd: reqd,
+          nonNegative: nonNegative,
+        ),
+        formKey: formKey,
+      );
+      return formKey;
+    }
+
+    const negativeMsg = 'Value cannot be negative for Height';
+
+    testWidgets('a negative value is rejected with Frappe\'s message', (
+      tester,
+    ) async {
+      final formKey = await pumpFlagged(tester);
+      await tester.enterText(find.byType(TextField), '-2.5');
+      expect(formKey.currentState!.saveAndValidate(), isFalse);
+      await tester.pump();
+      expect(find.text(negativeMsg), findsOneWidget);
+    });
+
+    testWidgets('the error shows while typing, before any save', (
+      tester,
+    ) async {
+      await pumpFlagged(tester, fieldtype: 'Int');
+      await tester.enterText(find.byType(TextField), '-3');
+      await tester.pump();
+      expect(find.text(negativeMsg), findsOneWidget);
+    });
+
+    testWidgets('zero, positive and empty values pass when not required', (
+      tester,
+    ) async {
+      final formKey = await pumpFlagged(tester);
+      for (final v in ['0', '4.75', '']) {
+        await tester.enterText(find.byType(TextField), v);
+        expect(formKey.currentState!.saveAndValidate(), isTrue, reason: v);
+      }
+    });
+
+    testWidgets('a lone minus sign is not "negative" (Frappe flt() → 0)', (
+      tester,
+    ) async {
+      final formKey = await pumpFlagged(tester);
+      await tester.enterText(find.byType(TextField), '-');
+      expect(formKey.currentState!.saveAndValidate(), isTrue);
+    });
+
+    testWidgets('required + flagged keeps the required and parse messages', (
+      tester,
+    ) async {
+      final formKey = await pumpFlagged(tester, reqd: true);
+      expect(formKey.currentState!.saveAndValidate(), isFalse);
+      await tester.pump();
+      expect(find.text('Height is required'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), '-');
+      formKey.currentState!.saveAndValidate();
+      await tester.pump();
+      expect(find.text('Please enter a valid number'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), '-1');
+      formKey.currentState!.saveAndValidate();
+      await tester.pump();
+      expect(find.text(negativeMsg), findsOneWidget);
+    });
+
+    testWidgets('an unflagged field still accepts a negative value', (
+      tester,
+    ) async {
+      final formKey = await pumpFlagged(tester, nonNegative: false);
+      await tester.enterText(find.byType(TextField), '-1');
+      expect(formKey.currentState!.saveAndValidate(), isTrue);
+    });
+  });
 }
